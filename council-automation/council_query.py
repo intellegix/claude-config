@@ -9,6 +9,7 @@ Usage:
     python council_query.py --mode auto "Try API first, fallback to browser"
     python council_query.py --mode browser --headful "Debug with visible browser"
     python council_query.py --mode browser --opus-synthesis "Add Opus re-synthesis"
+    python council_query.py --auto-context --mode browser "Auto-inject project context"
     python council_query.py --context-file ctx.md "Analyze this"
     python council_query.py --read                    # synthesis only (from cache)
     python council_query.py --read-full               # all 3 + synthesis
@@ -417,8 +418,7 @@ Produce your structured JSON synthesis now."""
                     "risks": [],
                 }
 
-            # Calculate cost from usage
-            # Opus 4.6 pricing: $15/1M input, $75/1M output (approximate)
+            # Opus 4.6 pricing: $15/1M input, $75/1M output
             cost = (input_tokens * 15 + output_tokens * 75) / 1_000_000
 
             return {
@@ -638,13 +638,23 @@ async def run_browser_query(
     }
 
     # Optionally run Opus re-synthesis for structured output
-    if opus_synthesis and models_dict:
+    if opus_synthesis:
         print("Running optional Opus 4.6 re-synthesis...", file=sys.stderr)
         model_results = [
             {"label": k, "model": k, "response": v.get("response"), "citations": [], "error": None}
             for k, v in models_dict.items()
             if v.get("response")
         ]
+        # Fallback: if no individual models extracted, use the synthesis text
+        if not model_results and browser_result.get("synthesis"):
+            print("  No individual model responses — using Perplexity synthesis as input", file=sys.stderr)
+            model_results = [{
+                "label": "Perplexity Council Synthesis",
+                "model": "perplexity-council",
+                "response": browser_result["synthesis"],
+                "citations": browser_result.get("citations", []),
+                "error": None,
+            }]
         if model_results:
             opus_result = run_opus_synthesis(query, model_results, context)
             if not opus_result.get("error"):
@@ -656,6 +666,10 @@ async def run_browser_query(
                     "cost": opus_result.get("cost", 0),
                     "error": None,
                 }
+            else:
+                print(f"  Opus synthesis failed: {opus_result.get('error')}", file=sys.stderr)
+        else:
+            print("  No model results or synthesis text available for Opus", file=sys.stderr)
 
     results = {
         "query": query,
@@ -795,6 +809,8 @@ def main() -> None:
     parser.add_argument("--read-model", help="Read specific model's response from cache")
     parser.add_argument("--headful", action="store_true", help="Run browser in visible mode")
     parser.add_argument("--opus-synthesis", action="store_true", help="Run Opus re-synthesis on browser results")
+    parser.add_argument("--auto-context", action="store_true",
+        help="Auto-generate project context from git/CLAUDE.md/MEMORY.md")
 
     args = parser.parse_args()
 
@@ -819,6 +835,23 @@ def main() -> None:
         ctx_path = Path(args.context_file)
         if ctx_path.exists():
             context = ctx_path.read_text(encoding="utf-8", errors="replace")
+
+    # Auto-generate context from session_context.py if --auto-context and no explicit context
+    AUTOMATION_DIR = Path(__file__).parent
+    if args.auto_context and not context:
+        try:
+            import subprocess
+            ctx_result = subprocess.run(
+                [sys.executable, str(AUTOMATION_DIR / "session_context.py"), os.getcwd()],
+                capture_output=True, text=True, timeout=10,
+            )
+            if ctx_result.returncode == 0 and ctx_result.stdout.strip():
+                context = ctx_result.stdout
+                print(f"Auto-context: {len(context)} chars from session_context.py", file=sys.stderr)
+            else:
+                print(f"WARNING: auto-context returned no output (exit {ctx_result.returncode})", file=sys.stderr)
+        except Exception as e:
+            print(f"WARNING: auto-context failed: {e}", file=sys.stderr)
 
     # Validate API keys based on mode
     if args.mode in ("api", "auto", "direct"):
