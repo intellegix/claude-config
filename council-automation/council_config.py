@@ -88,7 +88,7 @@ DIRECT_TIMEOUT = 60  # seconds per direct provider call
 # Headful by default — Cloudflare blocks headless Chromium on perplexity.ai.
 # Playwright headful runs in the background and doesn't need user interaction.
 BROWSER_HEADLESS = False
-BROWSER_TIMEOUT = 120_000  # ms, total timeout for council query
+BROWSER_TIMEOUT = 180_000  # ms, total timeout for council query
 BROWSER_STABLE_MS = 8_000  # ms, content unchanged = stable
 BROWSER_POLL_INTERVAL = 2_000  # ms, check interval
 BROWSER_TYPE_DELAY = 30  # ms between keystrokes

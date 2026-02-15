@@ -224,8 +224,26 @@ class PerplexityCouncil:
         """Type and submit the query."""
         textarea = self.selectors.get("textarea", "#ask-input")
 
-        # Fill the textarea (page.fill handles React inputs without sending Enter for newlines)
-        await page.fill(textarea, query)
+        # Use native setter to preserve newlines (page.fill() strips them)
+        await page.evaluate(
+            """([sel, text]) => {
+                const el = document.querySelector(sel);
+                if (!el) throw new Error('Textarea not found: ' + sel);
+                const setter = Object.getOwnPropertyDescriptor(
+                    HTMLTextAreaElement.prototype, 'value'
+                )?.set || Object.getOwnPropertyDescriptor(
+                    HTMLInputElement.prototype, 'value'
+                )?.set;
+                if (setter) {
+                    setter.call(el, text);
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                } else {
+                    el.value = text;
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                }
+            }""",
+            [textarea, query],
+        )
         await page.wait_for_timeout(500)
 
         # Submit via Enter
@@ -278,15 +296,20 @@ class PerplexityCouncil:
                             '{"models_completed":<0-3>,"synthesis_visible":<bool>,'
                             '"loading_active":<bool>,"page_state":"<state>",'
                             '"error_text":"<text or empty>"}\n\n'
+                            "IMPORTANT: Perplexity council has TWO phases:\n"
+                            "Phase 1: Individual model responses (shown as expandable rows with checkmarks)\n"
+                            "Phase 2: A SEPARATE synthesis/summary section BELOW the model rows. "
+                            "This is the main response text that streams AFTER all models finish.\n\n"
                             "page_state values:\n"
                             '- "loading": page is loading, no model responses yet\n'
-                            '- "generating": models are actively generating (streaming text, spinners)\n'
-                            '- "synthesizing": all models done, synthesis section generating\n'
-                            '- "complete": everything done, no loading indicators, citations/sources visible at bottom\n'
+                            '- "generating": models are actively generating (streaming text, spinners, pulsing)\n'
+                            '- "synthesizing": all 3 models have checkmarks BUT the synthesis text below '
+                            "is still streaming (text is appearing, cursor/caret visible, content growing)\n"
+                            '- "complete": synthesis text is FULLY rendered AND sources/citations section '
+                            "is visible at the very bottom of the page. No streaming, no pulsing, no loading.\n"
                             '- "error": error message, red/orange banner, or "try again" button visible\n\n'
-                            "Visual cues: checkmarks/green icons = model done; "
-                            "spinning/pulsing = still generating; "
-                            "separate bottom section with merged analysis = synthesis"
+                            "CRITICAL: Do NOT report 'complete' just because 3 model checkmarks are visible. "
+                            "The synthesis section below must ALSO be fully done with sources visible at bottom."
                         ),
                     },
                 ],
@@ -320,9 +343,16 @@ class PerplexityCouncil:
             return await self._wait_css_fallback(page, timeout, start)
 
     async def _wait_vision(self, page, timeout: int, start: float) -> bool:
-        """Vision-based completion detection using Haiku screenshots."""
+        """Vision-based completion detection using Haiku screenshots.
+
+        Enforces state machine: generating -> synthesizing -> complete.
+        Requires seeing 'synthesizing' before trusting 'complete', and
+        requires 2 consecutive 'complete' polls for confidence.
+        """
         poll_interval = VISION_POLL_INTERVAL_MODELS
         all_models_done = False
+        seen_synthesizing = False
+        consecutive_complete = 0
 
         _log("Vision monitoring: polling with Haiku screenshot analysis...")
 
@@ -335,14 +365,36 @@ class PerplexityCouncil:
                 page_state = state.get("page_state", "unknown")
                 _log(f"  Vision: {models_done}/3 models, state={page_state}")
 
-                if page_state == "complete":
-                    _log(f"Vision: page complete ({time.time() - start:.1f}s)")
-                    return True
-
                 if page_state == "error":
                     error = state.get("error_text", "unknown error")
                     _log(f"Vision: error detected: {error}")
                     return False
+
+                if page_state == "synthesizing":
+                    seen_synthesizing = True
+                    consecutive_complete = 0
+                    if not all_models_done:
+                        all_models_done = True
+                        poll_interval = VISION_POLL_INTERVAL_SYNTHESIS
+                        _log("  Synthesis phase detected, switching to faster polling")
+
+                if page_state == "complete":
+                    if not seen_synthesizing:
+                        # Haiku likely confused "3 checkmarks" with "complete"
+                        # Force at least one synthesizing cycle
+                        _log("  Vision reported 'complete' but no synthesizing seen yet — treating as synthesizing")
+                        seen_synthesizing = True
+                        if not all_models_done:
+                            all_models_done = True
+                            poll_interval = VISION_POLL_INTERVAL_SYNTHESIS
+                    else:
+                        consecutive_complete += 1
+                        if consecutive_complete >= 2:
+                            _log(f"Vision: page complete (confirmed 2x) ({time.time() - start:.1f}s)")
+                            return True
+                        _log(f"  Vision: complete (need 1 more confirmation)")
+                else:
+                    consecutive_complete = 0
 
                 # Switch to faster polling once all models done
                 if models_done >= 3 and not all_models_done:
