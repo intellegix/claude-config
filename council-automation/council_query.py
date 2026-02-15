@@ -910,7 +910,7 @@ def main() -> None:
             import subprocess
             ctx_result = subprocess.run(
                 [sys.executable, str(AUTOMATION_DIR / "session_context.py"), os.getcwd()],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
             )
             if ctx_result.returncode == 0 and ctx_result.stdout.strip():
                 context = ctx_result.stdout

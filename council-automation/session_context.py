@@ -25,6 +25,8 @@ def get_git_log(project_dir: Path, count: int = 10) -> str:
             cwd=str(project_dir),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
         )
         return result.stdout.strip() if result.returncode == 0 else ""
@@ -39,6 +41,8 @@ def get_git_diff_summary(project_dir: Path) -> str:
             cwd=str(project_dir),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
         )
         return result.stdout.strip() if result.returncode == 0 else ""
@@ -53,6 +57,8 @@ def get_recently_modified(project_dir: Path, count: int = 15) -> list[str]:
             cwd=str(project_dir),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
         )
         if result.returncode == 0 and result.stdout.strip():
