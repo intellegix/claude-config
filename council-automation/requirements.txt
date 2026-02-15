@@ -1,0 +1,6 @@
+perplexityai[aiohttp]
+anthropic>=0.40
+aiohttp
+openai>=1.0
+google-generativeai>=0.3.0
+playwright

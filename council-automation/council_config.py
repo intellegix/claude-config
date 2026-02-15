@@ -1,0 +1,105 @@
+"""Configuration for hybrid council automation."""
+
+from pathlib import Path
+
+# --- System-level capability toggle ---
+# When True AND a model has web_search_capable=True, the web_search tool
+# is included in Responses API calls. Currently False because Perplexity's
+# web_search tool causes empty output_text for Claude/Gemini and intermittent
+# failures for GPT-5.2. Flip to True when Perplexity fixes the tool-loop
+# abstraction, then re-test per model.
+WEB_SEARCH_ENABLED = False
+
+# --- Perplexity Responses API models ---
+# web_search_capable: whether the model *can* handle web_search (if API supports it)
+# Actual tool inclusion = web_search_capable AND WEB_SEARCH_ENABLED
+ANALYSIS_MODELS = [
+    {"id": "openai/gpt-5.2", "label": "GPT-5.2", "web_search_capable": True, "provider": "openai"},
+    {"id": "anthropic/claude-sonnet-4-5", "label": "Claude Sonnet 4.5", "web_search_capable": False, "provider": "anthropic"},
+    {"id": "google/gemini-3-pro-preview", "label": "Gemini 3 Pro", "web_search_capable": False, "provider": "google"},
+]
+
+# --- Fallback: chat/completions with Sonar (when Responses API is down) ---
+# Only Sonar models are available via chat/completions.
+# Loses multi-model diversity but gains reliability.
+FALLBACK_MODEL = "sonar-pro"
+FALLBACK_ENABLED = True  # Auto-fallback when Responses API times out
+
+# --- Synthesis model (Anthropic API direct) ---
+SYNTHESIS_MODEL = "claude-opus-4-6"
+THINKING_BUDGET = 10_000  # extended thinking tokens
+
+# --- Directories ---
+CACHE_DIR = Path.home() / ".claude" / "council-cache"
+HISTORY_DIR = CACHE_DIR / "history"
+AUTOMATION_DIR = Path.home() / ".claude" / "council-automation"
+COUNCIL_LOGS_DIR = Path.home() / ".claude" / "council-logs"
+SYNTHESIS_PROMPT_PATH = AUTOMATION_DIR / "synthesis_prompt.md"
+
+# --- Timeouts (seconds) ---
+PERPLEXITY_TIMEOUT = 60
+PERPLEXITY_CONNECT_TIMEOUT = 10  # Fast fail for connection-level issues
+SYNTHESIS_TIMEOUT = 120
+TOTAL_TIMEOUT = 180
+
+# --- Retry config ---
+PERPLEXITY_RETRIES = 1
+SYNTHESIS_RETRIES = 2
+
+# --- Model instructions ---
+MODEL_INSTRUCTIONS = (
+    "Provide concrete, actionable technical analysis. "
+    "If you have web search access, cite authoritative sources. "
+    "Focus on practical recommendations with specific file paths and code changes."
+)
+
+# --- Max output tokens for Perplexity models ---
+MAX_OUTPUT_TOKENS = 4096
+
+# --- Direct provider fallback (Tier 3) ---
+# When both Perplexity Responses API and Sonar are down, call providers directly.
+# Loses web search/citations but preserves multi-model diversity.
+DIRECT_PROVIDERS_ENABLED = True
+
+# Perplexity model ID → native provider model ID
+DIRECT_MODEL_MAP = {
+    "openai/gpt-5.2": "gpt-5.2",
+    "anthropic/claude-sonnet-4-5": "claude-sonnet-4-5-20250929",
+    "google/gemini-3-pro-preview": "gemini-3-pro-preview",
+}
+
+# Per-provider env var names for API keys
+PROVIDER_API_KEYS = {
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "google": "GOOGLE_API_KEY",
+}
+
+# Pricing per 1M tokens (input/output) for cost tracking
+DIRECT_PRICING = {
+    "openai/gpt-5.2": {"input": 1.75, "output": 14.0},
+    "anthropic/claude-sonnet-4-5": {"input": 3.0, "output": 15.0},
+    "google/gemini-3-pro-preview": {"input": 2.0, "output": 12.0},
+}
+
+DIRECT_TIMEOUT = 60  # seconds per direct provider call
+
+# --- Browser automation (Playwright) ---
+# Headful by default — Cloudflare blocks headless Chromium on perplexity.ai.
+# Playwright headful runs in the background and doesn't need user interaction.
+BROWSER_HEADLESS = False
+BROWSER_TIMEOUT = 120_000  # ms, total timeout for council query
+BROWSER_STABLE_MS = 8_000  # ms, content unchanged = stable
+BROWSER_POLL_INTERVAL = 2_000  # ms, check interval
+BROWSER_TYPE_DELAY = 30  # ms between keystrokes
+BROWSER_USER_DATA_DIR = Path.home() / ".claude" / "config" / "playwright-chrome-profile"
+BROWSER_SESSION_PATH = Path.home() / ".claude" / "config" / "playwright-session.json"
+SELECTORS_PATH = Path.home() / ".claude" / "perplexity-selectors.json"
+
+# --- Vision monitoring (Claude Haiku for page state detection) ---
+VISION_MODEL = "claude-haiku-4-5-20251001"
+VISION_MAX_TOKENS = 300
+VISION_POLL_INTERVAL_MODELS = 8  # seconds between screenshots during model generation
+VISION_POLL_INTERVAL_SYNTHESIS = 4  # seconds during synthesis phase (faster)
+VISION_JPEG_QUALITY = 60  # lower quality = fewer tokens = cheaper
+VISION_ENABLED = True  # Set False to force CSS selector fallback

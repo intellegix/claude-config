@@ -1,0 +1,23 @@
+{
+  "name": "claude-browser-bridge-mcp",
+  "version": "1.0.0",
+  "description": "MCP server bridging Claude Code CLI to Chrome extension via WebSocket",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test-standalone.js && node test-new-tools.js",
+    "test:new": "node test-new-tools.js",
+    "test:integration": "node --test test-integration.js",
+    "test:all": "node test-standalone.js && node test-new-tools.js && node --test test-integration.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "ws": "^8.18.0",
+    "better-sqlite3": "^11.7.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "private": true
+}

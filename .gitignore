@@ -1,0 +1,28 @@
+# ~/.claude git repo
+# Only track: council-automation/, commands/, mcp-servers/browser-bridge/
+# Everything else is excluded
+
+# Exclude everything by default
+*
+
+# Include the directories we want to track
+!.gitignore
+!council-automation/
+!council-automation/**
+!commands/
+!commands/**
+!mcp-servers/
+!mcp-servers/browser-bridge/
+!mcp-servers/browser-bridge/**
+
+# Exclude generated/runtime files within tracked dirs
+council-automation/__pycache__/
+mcp-servers/browser-bridge/node_modules/
+mcp-servers/browser-bridge/package-lock.json
+
+# Exclude sensitive config
+config/
+council-cache/
+council-logs/
+projects/
+*.jsonl
