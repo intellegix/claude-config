@@ -224,26 +224,31 @@ class PerplexityCouncil:
         """Type and submit the query."""
         textarea = self.selectors.get("textarea", "#ask-input")
 
-        # Use native setter to preserve newlines (page.fill() strips them)
-        await page.evaluate(
-            """([sel, text]) => {
-                const el = document.querySelector(sel);
-                if (!el) throw new Error('Textarea not found: ' + sel);
-                const setter = Object.getOwnPropertyDescriptor(
-                    HTMLTextAreaElement.prototype, 'value'
-                )?.set || Object.getOwnPropertyDescriptor(
-                    HTMLInputElement.prototype, 'value'
-                )?.set;
-                if (setter) {
-                    setter.call(el, text);
-                    el.dispatchEvent(new Event('input', { bubbles: true }));
-                } else {
-                    el.value = text;
-                    el.dispatchEvent(new Event('input', { bubbles: true }));
-                }
-            }""",
-            [textarea, query],
-        )
+        # Try native setter first (preserves newlines), fall back to page.fill()
+        try:
+            filled = await page.evaluate(
+                """([sel, text]) => {
+                    const el = document.querySelector(sel);
+                    if (!el) return false;
+                    // Try textarea/input native setter (React-compatible)
+                    const proto = el.tagName === 'TEXTAREA'
+                        ? HTMLTextAreaElement.prototype
+                        : HTMLInputElement.prototype;
+                    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+                    if (setter) {
+                        setter.call(el, text);
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                        return true;
+                    }
+                    return false;
+                }""",
+                [textarea, query],
+            )
+            if not filled:
+                raise ValueError("Native setter failed")
+        except Exception:
+            _log("Native setter unavailable, using page.fill()")
+            await page.fill(textarea, query)
         await page.wait_for_timeout(500)
 
         # Submit via Enter
