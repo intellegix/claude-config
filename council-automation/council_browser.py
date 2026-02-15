@@ -14,6 +14,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -64,14 +65,46 @@ class PerplexityCouncil:
         headless: bool = BROWSER_HEADLESS,
         session_path: Path | None = None,
         timeout: int = BROWSER_TIMEOUT,
+        save_artifacts: bool = False,
     ):
         self.headless = headless
         self.session_path = session_path or BROWSER_SESSION_PATH
         self.timeout = timeout
+        self.save_artifacts = save_artifacts
         self.selectors = _load_selectors()
         self.playwright = None
         self.context = None
         self.page = None
+        self._artifact_count = 0
+        self._artifact_dir: Path | None = None
+
+    def _init_artifact_dir(self, query: str) -> None:
+        """Create run artifact directory based on timestamp + query slug."""
+        slug = re.sub(r"[^a-z0-9]+", "-", query[:40].lower()).strip("-") or "query"
+        run_id = f"{time.strftime('%Y%m%d_%H%M')}_{slug[:30]}"
+        self._artifact_dir = Path("~/.claude/council-logs/runs").expanduser() / run_id
+        self._artifact_dir.mkdir(parents=True, exist_ok=True)
+        self._artifact_count = 0
+
+    async def _save_artifact(self, page, label: str) -> None:
+        """Capture screenshot + HTML as forensic artifacts. Non-fatal, capped at 10."""
+        if not self.save_artifacts or not self._artifact_dir:
+            return
+        if self._artifact_count >= 10:
+            return
+        try:
+            self._artifact_count += 1
+            # Screenshot
+            jpg_path = self._artifact_dir / f"{label}.jpg"
+            screenshot = await page.screenshot(type="jpeg", quality=80)
+            jpg_path.write_bytes(screenshot)
+            # Page HTML
+            html_path = self._artifact_dir / f"{label}.html"
+            html = await page.content()
+            html_path.write_text(html, encoding="utf-8")
+            _log(f"Artifact saved: {self._artifact_dir.name}/{label} (screenshot + html)")
+        except Exception as e:
+            _log(f"WARNING: Failed to save artifact '{label}': {e}")
 
     async def start(self) -> None:
         """Launch Chrome with persistent context (uses system Chrome to pass Cloudflare)."""
@@ -175,6 +208,7 @@ class PerplexityCouncil:
                 return True
             except Exception:
                 _log("Session invalid: input element not found (not logged in?)")
+                await self._save_artifact(page, "validate_failure")
                 return False
         finally:
             await page.close()
@@ -551,6 +585,7 @@ class PerplexityCouncil:
 
                 except Exception as e:
                     _log(f"  WARNING: Failed to extract model {i}: {e}")
+                    await self._save_artifact(page, f"model_{i}_error")
 
         except Exception as e:
             _log(f"WARNING: Failed to find model rows: {e}")
@@ -574,6 +609,7 @@ class PerplexityCouncil:
     async def run(self, query: str) -> dict:
         """Full pipeline: start -> validate -> council -> query -> wait -> extract."""
         start_time = time.time()
+        self._init_artifact_dir(query)
 
         try:
             _log("Starting Playwright browser...")
@@ -600,6 +636,7 @@ class PerplexityCouncil:
 
                 _log("Activating council mode...")
                 if not await self.activate_council(page):
+                    await self._save_artifact(page, "activate_failure")
                     return {"error": "Failed to activate council mode", "step": "activate"}
 
                 _log(f"Submitting query: {query[:80]}...")
@@ -609,6 +646,7 @@ class PerplexityCouncil:
                 completed = await self.wait_for_completion(page, self.timeout)
                 if not completed:
                     _log("WARNING: Timed out waiting for completion, extracting partial results")
+                    await self._save_artifact(page, "timeout")
 
                 _log("Extracting results...")
                 results = await self.extract_results(page)
@@ -626,6 +664,14 @@ class PerplexityCouncil:
                 await page.close()
 
         except Exception as e:
+            # Try to capture artifact on unhandled exception
+            if self.context:
+                try:
+                    pages = self.context.pages
+                    if pages:
+                        await self._save_artifact(pages[-1], "unhandled_exception")
+                except Exception:
+                    pass
             return {
                 "error": str(e),
                 "step": "unknown",
@@ -663,6 +709,8 @@ async def main() -> None:
     parser.add_argument("--save-session", action="store_true", help="Login and save session")
     parser.add_argument("--timeout", type=int, default=BROWSER_TIMEOUT, help="Timeout in ms")
     parser.add_argument("--session-path", type=str, help="Path to session file")
+    parser.add_argument("--save-artifacts", action="store_true", default=False,
+        help="Save screenshots/HTML on failure (default: True when --opus-synthesis)")
 
     args = parser.parse_args()
 
@@ -671,6 +719,7 @@ async def main() -> None:
         headless=not args.headful,
         session_path=session_path,
         timeout=args.timeout,
+        save_artifacts=args.save_artifacts,
     )
 
     if args.save_session:

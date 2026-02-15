@@ -463,6 +463,30 @@ def save_results(results: dict) -> Path:
     return latest_path
 
 
+def append_run_log(results: dict) -> None:
+    """Append a single JSON-line summary to the operational run log."""
+    log_entry = {
+        "timestamp": results.get("timestamp"),
+        "mode": results.get("mode"),
+        "query_len": len(results.get("query", "")),
+        "models_extracted": len(results.get("models", {})),
+        "synthesis_model": results.get("synthesis", {}).get("model"),
+        "thinking_tokens": results.get("synthesis", {}).get("thinking_tokens", 0),
+        "cost": results.get("total_cost", 0),
+        "execution_time_ms": results.get("execution_time_ms", 0),
+        "degraded": results.get("degraded", False),
+        "fallback_count": len(results.get("fallback_log", [])),
+        "error": results.get("synthesis", {}).get("error"),
+    }
+    try:
+        log_path = Path("~/.claude/council-logs/runs.jsonl").expanduser()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(log_entry, default=str) + "\n")
+    except Exception as e:
+        print(f"WARNING: Failed to write run log: {e}", file=sys.stderr)
+
+
 def read_cached(level: str = "synthesis") -> str:
     """Read cached results at the specified detail level."""
     latest = CACHE_DIR / "council_latest.json"
@@ -518,6 +542,7 @@ def read_cached(level: str = "synthesis") -> str:
 async def run_api_query(query: str, context: str) -> dict:
     """Execute the full API query pipeline."""
     start = time.time()
+    fallback_log: list[dict] = []
 
     # Step 1: Query models (parallel, capability-aware)
     print("Querying models...", file=sys.stderr)
@@ -536,7 +561,6 @@ async def run_api_query(query: str, context: str) -> dict:
             })
         else:
             model_results.append(r)
-            # Build a short key for the models dict
             label = r.get("label", r.get("model", "unknown"))
             models_dict[label] = {
                 "response": r.get("response"),
@@ -546,10 +570,24 @@ async def run_api_query(query: str, context: str) -> dict:
                 "citations": r.get("citations", []),
                 "error": r.get("error"),
             }
+            # Track fallback models
+            if r.get("label") == "Sonar Pro (fallback)":
+                fallback_log.append({
+                    "decision": "sonar_fallback",
+                    "reason": "Responses API unreachable or all models empty",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
 
     # Step 2: Opus synthesis
     print("Running Opus 4.6 synthesis with extended thinking...", file=sys.stderr)
     synthesis = run_opus_synthesis(query, model_results, context)
+
+    if synthesis.get("error"):
+        fallback_log.append({
+            "decision": "synthesis_error",
+            "reason": synthesis["error"],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
 
     elapsed = int((time.time() - start) * 1000)
 
@@ -572,9 +610,12 @@ async def run_api_query(query: str, context: str) -> dict:
         },
         "total_cost": round(model_cost + synthesis_cost, 6),
         "execution_time_ms": elapsed,
+        "fallback_log": fallback_log,
+        "degraded": len(fallback_log) > 0,
     }
 
     save_results(results)
+    append_run_log(results)
     return results
 
 
@@ -591,13 +632,14 @@ async def run_browser_query(
         }
 
     start = time.time()
+    fallback_log: list[dict] = []
     full_query = f"{context}\n\n{query}" if context else query
 
     # Use config default (BROWSER_HEADLESS=False, i.e. headful) unless explicitly overridden
+    kwargs = {"save_artifacts": opus_synthesis}  # artifacts on by default when opus_synthesis
     if headful is not None:
-        council = PerplexityCouncil(headless=not headful)
-    else:
-        council = PerplexityCouncil()  # Uses BROWSER_HEADLESS config (headful by default)
+        kwargs["headless"] = not headful
+    council = PerplexityCouncil(**kwargs)
     try:
         browser_result = await council.run(full_query)
     finally:
@@ -648,6 +690,11 @@ async def run_browser_query(
         # Fallback: if no individual models extracted, use the synthesis text
         if not model_results and browser_result.get("synthesis"):
             print("  No individual model responses — using Perplexity synthesis as input", file=sys.stderr)
+            fallback_log.append({
+                "decision": "opus_input_fallback",
+                "reason": f"0/{len(browser_result.get('models', {}))} models extracted, using synthesis text",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
             model_results = [{
                 "label": "Perplexity Council Synthesis",
                 "model": "perplexity-council",
@@ -668,8 +715,18 @@ async def run_browser_query(
                 }
             else:
                 print(f"  Opus synthesis failed: {opus_result.get('error')}", file=sys.stderr)
+                fallback_log.append({
+                    "decision": "opus_synthesis_error",
+                    "reason": opus_result["error"],
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
         else:
             print("  No model results or synthesis text available for Opus", file=sys.stderr)
+            fallback_log.append({
+                "decision": "opus_skipped",
+                "reason": "No model results or synthesis text available",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
 
     results = {
         "query": query,
@@ -680,9 +737,12 @@ async def run_browser_query(
         "citations": browser_result.get("citations", []),
         "total_cost": synthesis_data.get("cost", 0),
         "execution_time_ms": elapsed,
+        "fallback_log": fallback_log,
+        "degraded": len(fallback_log) > 0,
     }
 
     save_results(results)
+    append_run_log(results)
     return results
 
 
@@ -784,6 +844,13 @@ def format_synthesis_output(results: dict) -> str:
         sections.append(narrative)
         sections.append("")
 
+    # Degradation notes
+    if results.get("degraded"):
+        sections.append("## Degradation Notes")
+        for entry in results.get("fallback_log", []):
+            sections.append(f"- **{entry.get('decision', 'unknown')}**: {entry.get('reason', '')}")
+        sections.append("")
+
     # Model error summary
     models = results.get("models", {})
     errors = [(k, v.get("error")) for k, v in models.items() if v.get("error")]
@@ -882,8 +949,10 @@ def main() -> None:
     elif args.mode == "direct":
         from council_providers import query_direct_providers
         model_results = asyncio.run(query_direct_providers(ANALYSIS_MODELS, f"{context}\n\n{args.query}" if context else args.query, DIRECT_TIMEOUT))
-        # Run synthesis
         synthesis = run_opus_synthesis(args.query, model_results, context)
+        fallback_log = []
+        if synthesis.get("error"):
+            fallback_log.append({"decision": "synthesis_error", "reason": synthesis["error"], "timestamp": datetime.now(timezone.utc).isoformat()})
         results = {
             "query": args.query,
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -892,8 +961,11 @@ def main() -> None:
             "synthesis": {"model": synthesis.get("model"), **synthesis.get("parsed", {}), "cost": synthesis.get("cost", 0), "error": synthesis.get("error")},
             "total_cost": sum(r.get("cost", 0) for r in model_results) + synthesis.get("cost", 0),
             "execution_time_ms": 0,
+            "fallback_log": fallback_log,
+            "degraded": len(fallback_log) > 0,
         }
         save_results(results)
+        append_run_log(results)
     else:
         results = asyncio.run(run_api_query(args.query, context))
 
