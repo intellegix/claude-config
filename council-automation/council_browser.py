@@ -58,7 +58,12 @@ def _load_selectors() -> dict:
 
 
 class PerplexityCouncil:
-    """Autonomous Playwright-based Perplexity council automation."""
+    """Autonomous Playwright-based Perplexity automation.
+
+    Supports two Perplexity modes:
+      - "council": /council slash command (multi-model, 3 AI responses + synthesis)
+      - "research": /research slash command (deep research, single synthesized response)
+    """
 
     def __init__(
         self,
@@ -66,11 +71,13 @@ class PerplexityCouncil:
         session_path: Path | None = None,
         timeout: int = BROWSER_TIMEOUT,
         save_artifacts: bool = False,
+        perplexity_mode: str = "council",
     ):
         self.headless = headless
         self.session_path = session_path or BROWSER_SESSION_PATH
         self.timeout = timeout
         self.save_artifacts = save_artifacts
+        self.perplexity_mode = perplexity_mode
         self.selectors = _load_selectors()
         self.playwright = None
         self.context = None
@@ -213,8 +220,13 @@ class PerplexityCouncil:
         finally:
             await page.close()
 
-    async def activate_council(self, page) -> bool:
-        """Activate council mode via /council slash command."""
+    async def activate_mode(self, page) -> bool:
+        """Activate the configured Perplexity mode via slash command.
+
+        Supports: /council (multi-model) and /research (deep research).
+        """
+        slash_cmd = f"/{self.perplexity_mode}"
+        _log(f"Activating {self.perplexity_mode} mode via {slash_cmd}...")
         textarea = self.selectors.get("textarea", "#ask-input")
 
         # Focus the input
@@ -225,23 +237,31 @@ class PerplexityCouncil:
             _log(f"Failed to focus input: {e}")
             return False
 
-        # Type /council slash command
-        await page.keyboard.type("/council", delay=BROWSER_TYPE_DELAY)
+        # Type the slash command
+        await page.keyboard.type(slash_cmd, delay=BROWSER_TYPE_DELAY)
         await page.wait_for_timeout(1500)  # Wait for command palette
 
         # Press Enter to activate
         await page.keyboard.press("Enter")
         await page.wait_for_timeout(1500)  # Wait for activation
 
-        # Verify: check for council activation indicators
+        # Verify activation based on mode
+        if self.perplexity_mode == "council":
+            return await self._verify_council_activation(page)
+        elif self.perplexity_mode == "research":
+            return await self._verify_research_activation(page)
+        else:
+            _log(f"Unknown mode '{self.perplexity_mode}', proceeding optimistically")
+            return True
+
+    async def _verify_council_activation(self, page) -> bool:
+        """Verify council mode activated (look for '3 models' indicator)."""
         try:
-            # Look for "3 models" button or "Model council" text
             three_models = self.selectors.get("threeModelsDropdown", "button[aria-label='3 models']")
             await page.wait_for_selector(three_models, timeout=5000)
             _log("Council mode activated (found '3 models' indicator)")
             return True
         except Exception:
-            # Fallback: check for any council-related text
             try:
                 council_text = await page.evaluate(
                     "!!document.querySelector('button')?.textContent?.includes('Model council')"
@@ -253,6 +273,30 @@ class PerplexityCouncil:
                 pass
             _log("WARNING: Could not verify council activation, proceeding anyway")
             return True  # Proceed optimistically
+
+    async def _verify_research_activation(self, page) -> bool:
+        """Verify research mode activated (look for research indicators)."""
+        try:
+            # Research mode shows a "Research" or "Deep Research" indicator
+            found = await page.evaluate("""() => {
+                const buttons = document.querySelectorAll('button, [role="button"], div[data-state]');
+                for (const b of buttons) {
+                    const text = (b.textContent || '').trim().toLowerCase();
+                    if (text.includes('research') || text.includes('deep research')) return true;
+                }
+                return false;
+            }""")
+            if found:
+                _log("Research mode activated (found research indicator)")
+                return True
+        except Exception:
+            pass
+        _log("WARNING: Could not verify research activation, proceeding anyway")
+        return True  # Proceed optimistically
+
+    async def activate_council(self, page) -> bool:
+        """Activate council mode. Delegates to activate_mode()."""
+        return await self.activate_mode(page)
 
     async def submit_query(self, page, query: str) -> None:
         """Type and submit the query."""
@@ -512,8 +556,160 @@ class PerplexityCouncil:
         _log(f"Completion wait timed out after {time.time() - start:.1f}s")
         return False
 
+    async def _find_model_cards(self, page) -> list:
+        """Find the 3 model card elements using JS evaluation (more reliable than CSS selectors).
+
+        Strategy 1: querySelectorAll for model card containers (overflow-hidden rounded-xl)
+        Strategy 2: Text-walk heuristic — find model name text, walk up to card boundary.
+        Both run in page JS context to avoid Playwright CSS selector quirks.
+        """
+        # Strategy 1: direct querySelectorAll in page JS
+        card_count = await page.evaluate("""() => {
+            return document.querySelectorAll(
+                'div[class*="overflow-hidden"][class*="rounded-xl"][class*="border-subtler"]'
+            ).length;
+        }""")
+        _log(f"Model card JS querySelectorAll count: {card_count}")
+
+        if card_count >= 2:
+            # Use Playwright locator which supports auto-waiting
+            cards = await page.query_selector_all(
+                'div[class*="overflow-hidden"][class*="rounded-xl"][class*="border-subtler"]'
+            )
+            if len(cards) >= 2:
+                _log(f"Found {len(cards)} model cards via primary selector")
+                return cards
+
+        # If CSS selector didn't work but JS found them, use evaluate_handle
+        if card_count >= 2:
+            handles = []
+            for i in range(card_count):
+                h = await page.evaluate_handle(
+                    f"""() => document.querySelectorAll(
+                        'div[class*="overflow-hidden"][class*="rounded-xl"][class*="border-subtler"]'
+                    )[{i}]"""
+                )
+                handles.append(h.as_element())
+            handles = [h for h in handles if h is not None]
+            if len(handles) >= 2:
+                _log(f"Found {len(handles)} model cards via evaluate_handle")
+                return handles
+
+        # Strategy 2: heuristic — walk text nodes for model names, find card boundaries
+        model_names = ["GPT", "Claude", "Gemini"]
+        card_indices = await page.evaluate("""(modelNames) => {
+            const cards = [];
+            const allDivs = document.querySelectorAll('div');
+            // Build index of divs with class containing 'rounded-xl'
+            const roundedDivs = [];
+            allDivs.forEach((div, idx) => {
+                const cls = div.className?.toString() || '';
+                if (cls.includes('rounded-xl') && cls.includes('border')) {
+                    const text = div.textContent || '';
+                    if (text.length > 20 && text.length < 50000) {
+                        roundedDivs.push({ idx, text: text.substring(0, 300), cls: cls.substring(0, 200) });
+                    }
+                }
+            });
+            // Filter to those containing model name text
+            for (const name of modelNames) {
+                const match = roundedDivs.find(d =>
+                    d.text.includes(name) && !cards.some(c => c.idx === d.idx)
+                );
+                if (match) cards.push(match);
+            }
+            return cards;
+        }""", model_names)
+
+        if card_indices and len(card_indices) >= 2:
+            _log(f"Found {len(card_indices)} model cards via heuristic (names: {[c.get('text', '')[:30] for c in card_indices]})")
+            # Get element handles by re-querying
+            handles = []
+            for card_info in card_indices:
+                cls_prefix = card_info.get("cls", "")[:40]
+                if cls_prefix:
+                    h = await page.evaluate_handle(
+                        """(clsPrefix) => {
+                            const divs = document.querySelectorAll('div');
+                            for (const d of divs) {
+                                if ((d.className?.toString() || '').startsWith(clsPrefix)) {
+                                    return d;
+                                }
+                            }
+                            return null;
+                        }""",
+                        cls_prefix,
+                    )
+                    el = h.as_element()
+                    if el:
+                        handles.append(el)
+            if handles:
+                return handles
+
+        # 0 model cards is normal — Perplexity may use single-model mode for simpler queries
+        _log(f"No model cards found (council may have used single-model mode)")
+        return []
+
+    async def _extract_model_name(self, card) -> str:
+        """Extract the clean model name from a model card element."""
+        name = await card.evaluate("""el => {
+            // Look for the model name text element (font-medium, text-xs)
+            const nameEl = el.querySelector(
+                'div[class*="font-medium"][class*="text-xs"][class*="text-foreground"]'
+            );
+            if (nameEl) return nameEl.textContent.trim();
+            // Fallback: first short text child
+            const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+            while (walker.nextNode()) {
+                const t = walker.currentNode.textContent.trim();
+                if (t.length > 2 && t.length < 60) return t;
+            }
+            return '';
+        }""")
+        # Clean up: strip "Thinking", "X steps", etc. suffixes
+        if name:
+            for suffix in [" Thinking", " Writing", " Searching"]:
+                if name.endswith(suffix):
+                    name = name[: -len(suffix)]
+        return (name or "Unknown Model")[:50]
+
+    async def _extract_panel_response(self, page) -> str:
+        """Extract the response text from the currently active model panel."""
+        # The panel slides in with data-state="active" and contains .prose content
+        panel_prose_sel = self.selectors.get(
+            "councilModelPanelProse", "div[data-state='active'] .prose"
+        )
+        try:
+            text = await page.evaluate(
+                f'document.querySelector("{panel_prose_sel}")?.innerText || ""'
+            )
+            if text:
+                return text
+        except Exception:
+            pass
+
+        # Fallback: data-state="active" with h-full class, extract all text
+        panel_sel = self.selectors.get(
+            "councilModelPanel", "div[data-state='active'].h-full"
+        )
+        try:
+            text = await page.evaluate(
+                f'document.querySelector("{panel_sel}")?.innerText || ""'
+            )
+            return text or ""
+        except Exception:
+            return ""
+
     async def extract_results(self, page) -> dict:
-        """Extract synthesis and per-model responses from the page."""
+        """Extract synthesis and per-model responses from the page.
+
+        DOM structure (validated 2026-02-16):
+          - Synthesis: first div.prose.inline element
+          - Model cards: 3x div.overflow-hidden.rounded-xl.border-subtler
+            - Each has a cursor-pointer clickable header
+            - Model name in div.font-medium.text-xs.text-foreground
+            - Clicking opens a data-state='active' slide-out panel on right
+        """
         results = {
             "synthesis": "",
             "models": {},
@@ -521,74 +717,68 @@ class PerplexityCouncil:
         }
 
         # Extract synthesis text
-        synthesis_sel = self.selectors.get("councilSynthesis", ".prose:first-of-type")
+        synthesis_sel = self.selectors.get("councilSynthesis", "div.prose.inline")
+        synthesis_fallback = self.selectors.get("councilSynthesisFallback", ".prose:first-of-type")
         try:
-            results["synthesis"] = await page.evaluate(
+            text = await page.evaluate(
                 f'document.querySelector("{synthesis_sel}")?.innerText || ""'
             )
+            if not text:
+                text = await page.evaluate(
+                    f'document.querySelector("{synthesis_fallback}")?.innerText || ""'
+                )
+            results["synthesis"] = text
             _log(f"Extracted synthesis: {len(results['synthesis'])} chars")
         except Exception as e:
             _log(f"WARNING: Failed to extract synthesis: {e}")
 
-        # Extract individual model responses by clicking each model row
-        model_row_sel = self.selectors.get(
-            "councilModelRow", "[class*='interactable'][class*='appearance-none']"
-        )
-        model_row_fallback = self.selectors.get(
-            "councilModelRowFallback", "[class*='gap-x-xs'][class*='items-center']"
-        )
+        # Find model cards
+        cards = await self._find_model_cards(page)
+        _log(f"Found {len(cards)} model cards")
 
-        try:
-            rows = await page.query_selector_all(model_row_sel)
-            if not rows:
-                rows = await page.query_selector_all(model_row_fallback)
+        # Extract per-model responses by clicking each card
+        for i, card in enumerate(cards):
+            try:
+                model_name = await self._extract_model_name(card)
 
-            _log(f"Found {len(rows)} model rows")
-
-            for i, row in enumerate(rows):
-                try:
-                    # Get model name from the row
-                    model_name = await row.evaluate(
-                        "el => el.querySelector('[class*=\"font-medium\"]')?.textContent?.trim() || "
-                        "el.textContent?.trim()?.split('\\n')[0] || 'Unknown Model'",
+                # Click the card header to expand the model panel
+                clickable = await card.query_selector(
+                    self.selectors.get(
+                        "councilModelClickableRow",
+                        "div[class*='cursor-pointer'][class*='p-3']",
                     )
-                    model_name = (model_name or f"Model {i}")[:50]
+                )
+                target = clickable or card
+                await target.click()
+                await page.wait_for_timeout(1500)
 
-                    # Click to expand model panel
-                    await row.click()
-                    await page.wait_for_timeout(1000)
+                # Extract the response from the active panel
+                response_text = await self._extract_panel_response(page)
 
-                    # Extract model response from panel
-                    panel_sel = self.selectors.get("councilModelPanel", ".prose:nth-of-type(2)")
-                    try:
-                        response_text = await page.evaluate(
-                            f'document.querySelector("{panel_sel}")?.innerText || ""'
-                        )
-                    except Exception:
-                        response_text = ""
+                if response_text:
+                    results["models"][model_name] = {"response": response_text}
+                    _log(f"  Model '{model_name}': {len(response_text)} chars")
+                else:
+                    _log(f"  Model '{model_name}': no response text in panel")
+                    await self._save_artifact(page, f"model_{i}_empty_panel")
 
-                    if response_text:
-                        results["models"][model_name] = {"response": response_text}
-                        _log(f"  Model '{model_name}': {len(response_text)} chars")
-
-                    # Close panel
-                    close_sel = self.selectors.get("councilPanelClose", "button[aria-label='Close']")
-                    try:
-                        close_btn = await page.query_selector(close_sel)
-                        if close_btn:
-                            await close_btn.click()
-                            await page.wait_for_timeout(500)
-                    except Exception:
-                        # Press Escape as fallback
+                # Close the panel (Escape or close button)
+                close_sel = self.selectors.get("councilPanelClose", "button[aria-label='Close']")
+                try:
+                    close_btn = await page.query_selector(close_sel)
+                    if close_btn:
+                        await close_btn.click()
+                        await page.wait_for_timeout(500)
+                    else:
                         await page.keyboard.press("Escape")
                         await page.wait_for_timeout(500)
+                except Exception:
+                    await page.keyboard.press("Escape")
+                    await page.wait_for_timeout(500)
 
-                except Exception as e:
-                    _log(f"  WARNING: Failed to extract model {i}: {e}")
-                    await self._save_artifact(page, f"model_{i}_error")
-
-        except Exception as e:
-            _log(f"WARNING: Failed to find model rows: {e}")
+            except Exception as e:
+                _log(f"  WARNING: Failed to extract model {i}: {e}")
+                await self._save_artifact(page, f"model_{i}_error")
 
         # Extract citations
         try:
@@ -634,10 +824,10 @@ class PerplexityCouncil:
                 )
                 await page.wait_for_timeout(2000)
 
-                _log("Activating council mode...")
-                if not await self.activate_council(page):
+                _log(f"Activating {self.perplexity_mode} mode...")
+                if not await self.activate_mode(page):
                     await self._save_artifact(page, "activate_failure")
-                    return {"error": "Failed to activate council mode", "step": "activate"}
+                    return {"error": f"Failed to activate {self.perplexity_mode} mode", "step": "activate"}
 
                 _log(f"Submitting query: {query[:80]}...")
                 await self.submit_query(page, query)

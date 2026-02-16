@@ -1,5 +1,7 @@
 """Configuration for hybrid council automation."""
 
+import os
+import sys
 from pathlib import Path
 
 # --- System-level capability toggle ---
@@ -103,3 +105,53 @@ VISION_POLL_INTERVAL_MODELS = 8  # seconds between screenshots during model gene
 VISION_POLL_INTERVAL_SYNTHESIS = 4  # seconds during synthesis phase (faster)
 VISION_JPEG_QUALITY = 60  # lower quality = fewer tokens = cheaper
 VISION_ENABLED = True  # Set False to force CSS selector fallback
+
+
+def validate_config(mode: str) -> tuple[list[str], list[str]]:
+    """Validate configuration for the given mode.
+
+    Returns (errors, warnings) — errors are fatal for the mode, warnings are informational.
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    # Common: ensure output directories are writable
+    for d in [CACHE_DIR, HISTORY_DIR, COUNCIL_LOGS_DIR]:
+        if not d.exists():
+            try:
+                d.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                errors.append(f"Cannot create directory {d}: {e}")
+
+    if mode in ("browser", "auto"):
+        try:
+            from playwright.async_api import async_playwright  # noqa: F401
+        except ImportError:
+            errors.append("Playwright not installed: pip install playwright && playwright install chromium")
+        if not BROWSER_SESSION_PATH.exists():
+            warnings.append(f"No session file: {BROWSER_SESSION_PATH}. Run: python council_browser.py --save-session")
+
+    if mode in ("api", "auto", "direct"):
+        if not os.environ.get("PERPLEXITY_API_KEY"):
+            if mode == "auto":
+                warnings.append("PERPLEXITY_API_KEY not set — auto mode will skip API tier")
+            elif mode != "direct":
+                errors.append("PERPLEXITY_API_KEY not set (required for api mode)")
+
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        warnings.append("ANTHROPIC_API_KEY not set — Opus synthesis and vision monitoring disabled")
+
+    return errors, warnings
+
+
+def print_validation(mode: str) -> bool:
+    """Run validation and print results. Returns True if no fatal errors."""
+    errors, warnings = validate_config(mode)
+    for w in warnings:
+        print(f"  WARNING: {w}", file=sys.stderr)
+    for e in errors:
+        print(f"  ERROR: {e}", file=sys.stderr)
+    if errors:
+        print(f"  Startup validation failed for --mode {mode}", file=sys.stderr)
+        return False
+    return True

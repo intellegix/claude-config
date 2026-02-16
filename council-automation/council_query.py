@@ -54,6 +54,7 @@ from council_config import (
     SYNTHESIS_TIMEOUT,
     THINKING_BUDGET,
     WEB_SEARCH_ENABLED,
+    print_validation,
 )
 
 
@@ -611,7 +612,7 @@ async def run_api_query(query: str, context: str) -> dict:
         "total_cost": round(model_cost + synthesis_cost, 6),
         "execution_time_ms": elapsed,
         "fallback_log": fallback_log,
-        "degraded": len(fallback_log) > 0,
+        "degraded": any(f.get("severity") != "info" for f in fallback_log),
     }
 
     save_results(results)
@@ -620,9 +621,17 @@ async def run_api_query(query: str, context: str) -> dict:
 
 
 async def run_browser_query(
-    query: str, context: str, headful: bool | None = None, opus_synthesis: bool = False
+    query: str,
+    context: str,
+    headful: bool | None = None,
+    opus_synthesis: bool = False,
+    perplexity_mode: str = "council",
 ) -> dict:
-    """Execute query via Playwright browser automation against Perplexity UI."""
+    """Execute query via Playwright browser automation against Perplexity UI.
+
+    Args:
+        perplexity_mode: "council" for multi-model council, "research" for deep research.
+    """
     try:
         from council_browser import PerplexityCouncil
     except ImportError:
@@ -636,7 +645,7 @@ async def run_browser_query(
     full_query = f"{context}\n\n{query}" if context else query
 
     # Use config default (BROWSER_HEADLESS=False, i.e. headful) unless explicitly overridden
-    kwargs = {"save_artifacts": opus_synthesis}  # artifacts on by default when opus_synthesis
+    kwargs = {"save_artifacts": opus_synthesis, "perplexity_mode": perplexity_mode}
     if headful is not None:
         kwargs["headless"] = not headful
     council = PerplexityCouncil(**kwargs)
@@ -664,7 +673,7 @@ async def run_browser_query(
 
     # Use Perplexity's native synthesis by default
     synthesis_data = {
-        "model": "perplexity-council",
+        "model": f"perplexity-{perplexity_mode}",
         "thinking_tokens": 0,
         "response": browser_result.get("synthesis", ""),
         "summary": browser_result.get("synthesis", "")[:500],
@@ -687,13 +696,15 @@ async def run_browser_query(
             for k, v in models_dict.items()
             if v.get("response")
         ]
-        # Fallback: if no individual models extracted, use the synthesis text
+        # Fallback: if no individual models extracted, use the synthesis text.
+        # This is normal — Perplexity may use single-model mode for simpler queries.
         if not model_results and browser_result.get("synthesis"):
             print("  No individual model responses — using Perplexity synthesis as input", file=sys.stderr)
             fallback_log.append({
                 "decision": "opus_input_fallback",
                 "reason": f"0/{len(browser_result.get('models', {}))} models extracted, using synthesis text",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
+                "severity": "info",  # Not an error — council may use fewer models
             })
             model_results = [{
                 "label": "Perplexity Council Synthesis",
@@ -728,6 +739,8 @@ async def run_browser_query(
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             })
 
+    # Only mark as degraded for genuine errors, not informational fallbacks
+    error_fallbacks = [f for f in fallback_log if f.get("severity") != "info"]
     results = {
         "query": query,
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -738,7 +751,7 @@ async def run_browser_query(
         "total_cost": synthesis_data.get("cost", 0),
         "execution_time_ms": elapsed,
         "fallback_log": fallback_log,
-        "degraded": len(fallback_log) > 0,
+        "degraded": len(error_fallbacks) > 0,
     }
 
     save_results(results)
@@ -876,6 +889,8 @@ def main() -> None:
     parser.add_argument("--read-model", help="Read specific model's response from cache")
     parser.add_argument("--headful", action="store_true", help="Run browser in visible mode")
     parser.add_argument("--opus-synthesis", action="store_true", help="Run Opus re-synthesis on browser results")
+    parser.add_argument("--perplexity-mode", choices=["council", "research"], default="council",
+        help="Perplexity slash command to use: /council (multi-model) or /research (deep research)")
     parser.add_argument("--auto-context", action="store_true",
         help="Auto-generate project context from git/CLAUDE.md/MEMORY.md")
 
@@ -895,6 +910,10 @@ def main() -> None:
     # Query mode — requires a query
     if not args.query:
         parser.error("Query is required unless using --read/--read-full/--read-model")
+
+    # Startup validation
+    if not print_validation(args.mode):
+        sys.exit(1)
 
     # Load context if provided
     context = ""
@@ -920,30 +939,13 @@ def main() -> None:
         except Exception as e:
             print(f"WARNING: auto-context failed: {e}", file=sys.stderr)
 
-    # Validate API keys based on mode
-    if args.mode in ("api", "auto", "direct"):
-        if not os.environ.get("PERPLEXITY_API_KEY"):
-            if args.mode == "auto":
-                print("WARNING: PERPLEXITY_API_KEY not set, auto mode will skip API tier", file=sys.stderr)
-            elif args.mode != "direct":
-                print("Error: PERPLEXITY_API_KEY not set", file=sys.stderr)
-                sys.exit(1)
-        if not os.environ.get("ANTHROPIC_API_KEY"):
-            if args.mode == "auto":
-                print("WARNING: ANTHROPIC_API_KEY not set, Opus synthesis disabled", file=sys.stderr)
-            elif args.mode != "direct":
-                print("Error: ANTHROPIC_API_KEY not set", file=sys.stderr)
-                sys.exit(1)
-
-    # Browser mode doesn't require API keys (uses Perplexity session cookies)
-    # --opus-synthesis requires ANTHROPIC_API_KEY
-    if args.mode == "browser" and args.opus_synthesis:
-        if not os.environ.get("ANTHROPIC_API_KEY"):
-            print("Error: ANTHROPIC_API_KEY required for --opus-synthesis", file=sys.stderr)
-            sys.exit(1)
-
     if args.mode == "browser":
-        results = asyncio.run(run_browser_query(args.query, context, True if args.headful else None, args.opus_synthesis))
+        results = asyncio.run(run_browser_query(
+            args.query, context,
+            headful=True if args.headful else None,
+            opus_synthesis=args.opus_synthesis,
+            perplexity_mode=args.perplexity_mode,
+        ))
     elif args.mode == "auto":
         results = asyncio.run(run_auto_query(args.query, context))
     elif args.mode == "direct":

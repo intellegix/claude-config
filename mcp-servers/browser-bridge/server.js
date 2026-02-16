@@ -978,6 +978,28 @@ class BrowserBridgeServer {
           },
         },
         {
+          name: 'research_query',
+          description: "Run a deep research query on Perplexity using /research mode via Playwright browser automation. Similar to council_query but uses Perplexity's deep research mode instead of multi-model council. Returns a comprehensive, single-thread research synthesis with citations. Good fallback when council mode defaults to single-model. Cost: $0 (uses Perplexity login session). Time: ~60-120s.",
+          inputSchema: {
+            type: 'object',
+            properties: {
+              query: { type: 'string', description: 'The research question or analysis request' },
+              includeContext: { type: 'boolean', description: 'Include project context (git log, CLAUDE.md, MEMORY.md). Default: true.' },
+              headful: { type: 'boolean', description: 'Run browser in visible mode. Default: false.' },
+              opusSynthesis: { type: 'boolean', description: 'Run Opus 4.6 re-synthesis on results (requires ANTHROPIC_API_KEY). Default: false.' },
+            },
+            required: ['query'],
+          },
+        },
+        {
+          name: 'council_metrics',
+          description: 'Get operational metrics from the council pipeline run log. Shows degradation ratio, avg cost, per-mode breakdown, error rate. Read-only — no network calls. Use to check pipeline health.',
+          inputSchema: {
+            type: 'object',
+            properties: {},
+          },
+        },
+        {
           name: 'council_read',
           description: 'Read cached council results from the most recent council_query. No network calls, no subprocess — pure file read. Use after council_query to retrieve results at different detail levels.',
           inputSchema: {
@@ -1359,10 +1381,13 @@ class BrowserBridgeServer {
         );
       }
 
+      case 'research_query':
       case 'council_query': {
         const query = Validator.text(args.query, 10_000);
+        const isResearch = name === 'research_query';
         const validModes = ['api', 'direct', 'browser', 'auto'];
-        const mode = validModes.includes(args.mode) ? args.mode : 'api';
+        // research_query always uses browser mode (Playwright + /research slash cmd)
+        const mode = isResearch ? 'browser' : (validModes.includes(args.mode) ? args.mode : 'api');
         const includeContext = Validator.boolean(args.includeContext, true);
         const scriptDir = join(homedir(), '.claude', 'council-automation');
         const cacheDir = join(homedir(), '.claude', 'council-cache');
@@ -1391,6 +1416,7 @@ class BrowserBridgeServer {
         }
         if (args.headful) scriptArgs.push('--headful');
         if (args.opusSynthesis) scriptArgs.push('--opus-synthesis');
+        if (isResearch) scriptArgs.push('--perplexity-mode', 'research');
         scriptArgs.push(query);
 
         // Browser and auto modes need longer timeout (up to 3 min for Playwright)
@@ -1402,6 +1428,19 @@ class BrowserBridgeServer {
           cwd: scriptDir,
         });
         return { synthesis: result };
+      }
+
+      case 'council_metrics': {
+        const scriptDir = join(homedir(), '.claude', 'council-automation');
+        const result = execFileSync('python', [
+          join(scriptDir, 'council_metrics.py'), '--json',
+        ], {
+          timeout: 10_000,
+          encoding: 'utf-8',
+          env: { ...process.env },
+          cwd: scriptDir,
+        });
+        return JSON.parse(result);
       }
 
       case 'council_read': {
