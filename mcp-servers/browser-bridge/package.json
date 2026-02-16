@@ -6,10 +6,12 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node test-standalone.js && node test-new-tools.js",
+    "test": "node test-new-tools.js && node --test test-context-manager.js && node --test test-handlers.js",
     "test:new": "node test-new-tools.js",
-    "test:integration": "node --test test-integration.js",
-    "test:all": "node test-standalone.js && node test-new-tools.js && node --test test-integration.js"
+    "test:context": "node --test test-context-manager.js",
+    "test:handlers": "node --test test-handlers.js",
+    "test:integration": "node test-standalone.js",
+    "test:all": "node test-standalone.js && node test-new-tools.js && node --test test-context-manager.js && node --test test-handlers.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
