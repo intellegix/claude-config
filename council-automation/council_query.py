@@ -656,7 +656,23 @@ async def run_browser_query(
         await council.stop()
 
     if browser_result.get("error"):
-        return browser_result
+        error_results = {
+            "query": query,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "mode": "browser",
+            "models": {},
+            "synthesis": {"response": None, "error": browser_result["error"]},
+            "total_cost": 0,
+            "execution_time_ms": int((time.time() - start) * 1000),
+            "error": browser_result["error"],
+            "code": browser_result.get("code"),
+            "step": browser_result.get("step"),
+            "fallback_log": [],
+            "degraded": True,
+        }
+        save_results(error_results)
+        append_run_log(error_results)
+        return error_results
 
     # Convert browser result to standard council result format
     models_dict = {}
@@ -783,9 +799,36 @@ async def run_auto_query(query: str, context: str) -> dict:
 
 def format_synthesis_output(results: dict) -> str:
     """Format synthesis for stdout (what Claude reads)."""
+    # Check for error results (BROWSER_BUSY, session expired, etc.)
+    if results.get("error"):
+        error_msg = results["error"]
+        code = results.get("code", "UNKNOWN")
+        step = results.get("step", "unknown")
+        return (
+            f"# Research/Council Query FAILED\n\n"
+            f"**Error:** {error_msg}\n"
+            f"**Code:** {code}\n"
+            f"**Step:** {step}\n\n"
+            f"If BROWSER_BUSY: another session is using Playwright. Wait ~2 min.\n"
+            f"If session expired: run `python council_browser.py --save-session`\n"
+        )
+
     synthesis = results.get("synthesis", {})
     summary = synthesis.get("summary", "")
     narrative = synthesis.get("narrative", "")
+    response = synthesis.get("response") or ""
+
+    # Guard against empty synthesis (browser completed but extracted 0 chars)
+    if not response and not summary and not narrative:
+        if not results.get("models"):
+            return (
+                f"# Research/Council Query — No Results\n\n"
+                f"**Mode:** {results.get('mode', 'unknown')}\n"
+                f"**Time:** {results.get('execution_time_ms', 0)/1000:.1f}s\n\n"
+                f"The query completed but returned no synthesis text.\n"
+                f"Check `~/.claude/council-cache/council_latest.json` for raw data.\n"
+            )
+
     confidence = synthesis.get("confidence", "unknown")
     total_cost = results.get("total_cost", 0)
     elapsed = results.get("execution_time_ms", 0)
