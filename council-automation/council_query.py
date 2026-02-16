@@ -21,6 +21,7 @@ import asyncio
 import io
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -457,7 +458,7 @@ def save_results(results: dict) -> Path:
 
     # Save timestamped copy
     ts = datetime.now().strftime("%Y-%m-%d_%H%M")
-    slug = results.get("query", "query")[:40].replace(" ", "-").replace("/", "_")
+    slug = re.sub(r'[^a-zA-Z0-9_-]', '-', results.get("query", "query")[:40]).strip("-")
     history_path = HISTORY_DIR / f"{ts}-{slug}.json"
     history_path.write_text(json.dumps(results, indent=2, default=str), encoding="utf-8")
 
