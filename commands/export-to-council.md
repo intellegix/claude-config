@@ -4,13 +4,29 @@ Query 3 frontier AI models (GPT-5.2, Claude Sonnet 4.5, Gemini 3 Pro) via Perple
 
 **No API keys required for browser mode** — uses Perplexity login session. API mode requires `PERPLEXITY_API_KEY` + `ANTHROPIC_API_KEY`.
 
+**CRITICAL: Do NOT ask the user questions before completing Step 0 and Step 1. Compile context silently, build the query, and execute. Only ask questions if $ARGUMENTS is empty AND you cannot determine a useful research focus from the compiled context.**
+
 ## Input
 
 `$ARGUMENTS` = Optional focus area or question (e.g., "focus on the database layer", "what should we prioritize next"). If empty, defaults to "general next steps".
 
 ## Workflow
 
+### Step 0: Compile Session Context — MANDATORY, SILENT
+
+**Before doing ANYTHING else**, compile the current session state. Do NOT ask the user any questions during this step — proceed silently and autonomously.
+
+1. **Read project memory**: Read the project's `MEMORY.md` from the auto-memory directory to understand what's been worked on, recent patterns, and known issues
+2. **Recent commits**: Run `git log --oneline -10` to see recent work
+3. **Uncommitted work**: Run `git diff --stat` to see what's in progress
+4. **Active tasks**: Check `TaskList` for any active/pending tasks
+5. **Synthesize**: Form a 1-paragraph internal "current state" summary — do NOT output this to the user, just hold it in context for Step 1
+
+Do NOT present findings. Do NOT ask questions. Proceed directly to Step 1.
+
 ### Step 1: Build the query prompt
+
+Using the compiled context from Step 0, build the council query. Do not ask the user for clarification — use the session context to determine the best research angle.
 
 Compose the council query from session context + focus area. The prompt should be:
 
