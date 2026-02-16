@@ -112,24 +112,11 @@ def main() -> None:
     recent_files = get_recently_modified(project_dir)
     claude_overview = extract_claude_md_overview(project_dir)
 
-    memory_dir = (
-        Path.home()
-        / ".claude"
-        / "projects"
-        / project_dir.as_posix().replace("/", "-").replace(":", "-").lstrip("-")
-        / "memory"
-    )
+    # Claude Code encodes project paths by replacing all non-alphanumeric chars with dashes
+    import re
+    hash_name = re.sub(r"[^a-zA-Z0-9]", "-", project_dir.as_posix()).lstrip("-")
+    memory_dir = Path.home() / ".claude" / "projects" / hash_name / "memory"
     memory_text = read_truncated(memory_dir / "MEMORY.md", max_lines=50)
-
-    # Also try project-local MEMORY.md
-    if not memory_text:
-        # Try the auto-memory in the projects dir
-        projects_dir = Path.home() / ".claude" / "projects"
-        # Convert project path to hash format
-        path_str = str(project_dir).replace("\\", "/")
-        hash_name = path_str.replace("/", "-").replace(":", "-").lstrip("-")
-        alt_memory = projects_dir / hash_name / "memory" / "MEMORY.md"
-        memory_text = read_truncated(alt_memory, max_lines=50)
 
     output = f"""# Session Context: {project_name}
 
