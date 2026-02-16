@@ -19,15 +19,23 @@ import sys
 import time
 from pathlib import Path
 
+import shutil
+import tempfile
+
 from council_config import (
     BROWSER_HEADLESS,
+    BROWSER_LOCALSTORAGE_PATH,
     BROWSER_POLL_INTERVAL,
     BROWSER_SESSION_PATH,
+    BROWSER_SESSIONS_DIR,
     BROWSER_STABLE_MS,
     BROWSER_TIMEOUT,
     BROWSER_TYPE_DELAY,
     BROWSER_USER_DATA_DIR,
+    MAX_CONCURRENT_SESSIONS,
     SELECTORS_PATH,
+    SEMAPHORE_TTL,
+    SEMAPHORE_WAIT_TIMEOUT,
     VISION_ENABLED,
     VISION_JPEG_QUALITY,
     VISION_MAX_TOKENS,
@@ -42,9 +50,118 @@ class BrowserBusyError(Exception):
     pass
 
 
-class BrowserLock:
-    """Cross-platform file lock for Playwright browser profile serialization.
+class SessionSemaphore:
+    """File-based counting semaphore for concurrent browser sessions.
 
+    Each active session creates a PID-named file in BROWSER_SESSIONS_DIR.
+    Supports wait-with-timeout instead of immediate failure.
+    Stale sessions are cleaned via PID liveness check + TTL expiry.
+    """
+
+    def __init__(
+        self,
+        max_sessions: int = MAX_CONCURRENT_SESSIONS,
+        ttl: int = SEMAPHORE_TTL,
+        sessions_dir: Path | None = None,
+    ):
+        self.max_sessions = max_sessions
+        self.ttl = ttl
+        self.sessions_dir = sessions_dir or BROWSER_SESSIONS_DIR
+        self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        self._session_file: Path | None = None
+
+    def _cleanup_stale(self) -> int:
+        """Remove session files for dead PIDs or expired TTL. Returns count removed."""
+        removed = 0
+        now = time.time()
+        for f in self.sessions_dir.glob("session-*.lock"):
+            try:
+                content = f.read_text(encoding="utf-8").strip()
+                parts = content.split()
+                pid = int(parts[0])
+                ts = float(parts[1]) if len(parts) > 1 else 0
+            except (ValueError, IndexError, OSError):
+                # Corrupt file — remove it
+                try:
+                    f.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+                continue
+
+            # Check PID liveness
+            pid_alive = True
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                pid_alive = False
+
+            # Remove if PID is dead or TTL expired
+            if not pid_alive or (self.ttl and now - ts > self.ttl):
+                try:
+                    f.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+
+        return removed
+
+    def _count_active(self) -> int:
+        """Count active session files (after cleanup)."""
+        return len(list(self.sessions_dir.glob("session-*.lock")))
+
+    def acquire(self, wait_timeout: float = SEMAPHORE_WAIT_TIMEOUT) -> None:
+        """Acquire a session slot. Waits up to wait_timeout seconds.
+
+        Raises BrowserBusyError if no slot becomes available.
+        """
+        start = time.time()
+        pid = os.getpid()
+
+        while True:
+            self._cleanup_stale()
+            active = self._count_active()
+
+            if active < self.max_sessions:
+                # Claim a slot
+                self._session_file = self.sessions_dir / f"session-{pid}.lock"
+                self._session_file.write_text(
+                    f"{pid} {time.time():.0f}\n", encoding="utf-8"
+                )
+                return
+
+            elapsed = time.time() - start
+            if elapsed >= wait_timeout:
+                raise BrowserBusyError(
+                    f"All {self.max_sessions} browser session slots are in use. "
+                    f"Waited {wait_timeout}s. Wait for a session to finish or use --mode api."
+                )
+
+            time.sleep(1)
+
+    def release(self) -> None:
+        """Release the session slot by deleting the session file."""
+        if self._session_file and self._session_file.exists():
+            try:
+                self._session_file.unlink()
+            except OSError:
+                pass
+            self._session_file = None
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *args):
+        self.release()
+
+
+# DEPRECATED: BrowserLock is replaced by SessionSemaphore (counting semaphore, max 3).
+# Kept for one release cycle for backward compatibility.
+class BrowserLock:
+    """DEPRECATED — Use SessionSemaphore instead.
+
+    Cross-platform file lock for Playwright browser profile serialization.
     On Windows uses msvcrt.locking(), on Unix uses fcntl.flock().
     Non-blocking: raises BrowserBusyError immediately if lock is held.
     """
@@ -59,9 +176,8 @@ class BrowserLock:
             self._fd = open(self.LOCK_PATH, 'w')
             self._fd.write(f"{os.getpid()} {time.time():.0f}\n")
             self._fd.flush()
-            self._fd.seek(0)  # msvcrt.locking locks from current position — must be consistent
+            self._fd.seek(0)
         except PermissionError:
-            # On Windows, open('w') truncation fails if another process holds a lock
             self._fd = None
             raise BrowserBusyError(
                 "Another council/research browser session is already running. "
@@ -85,7 +201,7 @@ class BrowserLock:
     def release(self):
         if self._fd:
             try:
-                self._fd.seek(0)  # Must match the lock position from acquire()
+                self._fd.seek(0)
                 if sys.platform == 'win32':
                     import msvcrt
                     msvcrt.locking(self._fd.fileno(), msvcrt.LK_UNLCK, 1)
@@ -140,18 +256,22 @@ class PerplexityCouncil:
         timeout: int = BROWSER_TIMEOUT,
         save_artifacts: bool = False,
         perplexity_mode: str = "council",
+        use_persistent: bool = False,
     ):
         self.headless = headless
         self.session_path = session_path or BROWSER_SESSION_PATH
         self.timeout = timeout
         self.save_artifacts = save_artifacts
         self.perplexity_mode = perplexity_mode
+        self.use_persistent = use_persistent
         self.selectors = _load_selectors()
         self.playwright = None
+        self._browser = None  # Separate browser object (non-persistent mode)
         self.context = None
         self.page = None
         self._artifact_count = 0
         self._artifact_dir: Path | None = None
+        self._temp_profile_dir: str | None = None  # Cloudflare fallback temp dir
 
     def _init_artifact_dir(self, query: str) -> None:
         """Create run artifact directory based on timestamp + query slug."""
@@ -181,18 +301,118 @@ class PerplexityCouncil:
         except Exception as e:
             _log(f"WARNING: Failed to save artifact '{label}': {e}")
 
+    @staticmethod
+    def _build_storage_state(
+        session_path: Path, localstorage_path: Path | None = None
+    ) -> dict | None:
+        """Build a Playwright storage_state dict from session + localStorage files.
+
+        Returns None if no session file exists.
+        """
+        if not session_path.exists():
+            return None
+
+        try:
+            data = json.loads(session_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+        cookies = []
+        if isinstance(data, list):
+            # Playwright-native format: list of cookie dicts
+            cookies = data
+        elif isinstance(data, dict):
+            # Legacy format: {cookies: "name=val; ...", localStorage: {...}}
+            cookies = PerplexityCouncil._parse_cookie_string(data.get("cookies", ""))
+
+        if not cookies:
+            return None
+
+        storage_state: dict = {"cookies": cookies, "origins": []}
+
+        # Merge localStorage if available
+        ls_path = localstorage_path or BROWSER_LOCALSTORAGE_PATH
+        if ls_path.exists():
+            try:
+                ls_data = json.loads(ls_path.read_text(encoding="utf-8"))
+                if isinstance(ls_data, dict) and ls_data:
+                    storage_state["origins"] = [{
+                        "origin": "https://www.perplexity.ai",
+                        "localStorage": [
+                            {"name": k, "value": v} for k, v in ls_data.items()
+                        ],
+                    }]
+            except Exception:
+                pass
+
+        return storage_state
+
+    @staticmethod
+    def _stealth_scripts() -> str:
+        """Return JavaScript to reduce automation detection."""
+        return """
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            if (!window.chrome) window.chrome = { runtime: {} };
+            delete window.__playwright;
+            delete window.__pw_manual;
+        """
+
     async def start(self) -> None:
-        """Launch Chrome with persistent context (uses system Chrome to pass Cloudflare)."""
+        """Launch browser. Uses non-persistent context by default (supports concurrency)."""
         from playwright.async_api import async_playwright
 
         self.playwright = await async_playwright().start()
 
-        # Ensure user data dir exists
+        if self.use_persistent:
+            await self._start_persistent()
+        else:
+            await self._start_non_persistent()
+
+    async def _start_non_persistent(self) -> None:
+        """Launch browser with browser.new_context(storage_state=...).
+
+        No shared profile directory — supports multiple concurrent sessions.
+        """
+        self._browser = await self.playwright.chromium.launch(
+            channel="chrome",
+            headless=self.headless,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ],
+        )
+
+        storage_state = self._build_storage_state(self.session_path)
+
+        if storage_state:
+            self.context = await self._browser.new_context(
+                viewport={"width": 1280, "height": 900},
+                storage_state=storage_state,
+            )
+            _log(f"Loaded {len(storage_state['cookies'])} cookies from {self.session_path.name}")
+            ls_origins = storage_state.get("origins", [])
+            if ls_origins:
+                ls_count = len(ls_origins[0].get("localStorage", []))
+                _log(f"Injected {ls_count} localStorage items")
+        else:
+            self.context = await self._browser.new_context(
+                viewport={"width": 1280, "height": 900},
+            )
+            # Fallback: try loading session via add_cookies if file exists
+            if self.session_path.exists():
+                await self._load_session()
+
+        # Apply stealth scripts
+        await self.context.add_init_script(self._stealth_scripts())
+
+    async def _start_persistent(self) -> None:
+        """Launch with persistent context (used for --save-session only)."""
         BROWSER_USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
         self.context = await self.playwright.chromium.launch_persistent_context(
             user_data_dir=str(BROWSER_USER_DATA_DIR),
-            channel="chrome",  # Use system Chrome binary (passes Cloudflare)
+            channel="chrome",
             headless=self.headless,
             args=[
                 "--disable-blink-features=AutomationControlled",
@@ -202,7 +422,30 @@ class PerplexityCouncil:
             viewport={"width": 1280, "height": 900},
         )
 
-        # Inject session cookies if available
+        if self.session_path.exists():
+            await self._load_session()
+
+    async def _start_with_temp_profile(self) -> None:
+        """Cloudflare fallback: persistent context with a temp profile directory.
+
+        Uses a unique temp dir per session — no SingletonLock conflicts.
+        Cookies injected via _load_session() after launch.
+        """
+        self._temp_profile_dir = tempfile.mkdtemp(prefix="council_browser_")
+        _log(f"Cloudflare fallback: using temp profile {self._temp_profile_dir}")
+
+        self.context = await self.playwright.chromium.launch_persistent_context(
+            user_data_dir=self._temp_profile_dir,
+            channel="chrome",
+            headless=self.headless,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ],
+            viewport={"width": 1280, "height": 900},
+        )
+
         if self.session_path.exists():
             await self._load_session()
 
@@ -886,14 +1129,29 @@ class PerplexityCouncil:
 
         return results
 
+    async def _cleanup_browser(self) -> None:
+        """Close current browser/context without stopping Playwright."""
+        if self.context:
+            try:
+                await self.context.close()
+            except Exception:
+                pass
+            self.context = None
+        if self._browser:
+            try:
+                await self._browser.close()
+            except Exception:
+                pass
+            self._browser = None
+
     async def run(self, query: str) -> dict:
-        """Full pipeline: start -> validate -> council -> query -> wait -> extract."""
+        """Full pipeline: semaphore -> start -> validate -> query -> wait -> extract."""
         start_time = time.time()
         self._init_artifact_dir(query)
-        self._lock = BrowserLock()
+        self._semaphore = SessionSemaphore()
 
         try:
-            self._lock.acquire()
+            self._semaphore.acquire(SEMAPHORE_WAIT_TIMEOUT)
         except BrowserBusyError as e:
             return {
                 "error": str(e),
@@ -907,10 +1165,21 @@ class PerplexityCouncil:
 
             _log("Validating session...")
             if not await self.validate_session():
-                return {
-                    "error": "Session expired or not logged in. Run: python council_browser.py --save-session",
-                    "step": "validate",
-                }
+                # Cloudflare may have blocked non-persistent context — retry with temp profile
+                if not self.use_persistent:
+                    _log("Non-persistent context failed validation, trying Cloudflare fallback...")
+                    await self._cleanup_browser()
+                    await self._start_with_temp_profile()
+                    if not await self.validate_session():
+                        return {
+                            "error": "Session expired or not logged in. Run: python council_browser.py --save-session",
+                            "step": "validate",
+                        }
+                else:
+                    return {
+                        "error": "Session expired or not logged in. Run: python council_browser.py --save-session",
+                        "step": "validate",
+                    }
 
             # Open a new page for the query
             page = await self.context.new_page()
@@ -968,7 +1237,7 @@ class PerplexityCouncil:
                 "execution_time_ms": int((time.time() - start_time) * 1000),
             }
         finally:
-            self._lock.release()
+            self._semaphore.release()
 
     async def save_session(self) -> None:
         """Save current browser session for future headless use."""
@@ -978,7 +1247,7 @@ class PerplexityCouncil:
 
         cookies = await self.context.cookies()
 
-        # Save in Playwright-native format
+        # Save cookies in Playwright-native format
         self.session_path.parent.mkdir(parents=True, exist_ok=True)
         self.session_path.write_text(
             json.dumps(cookies, indent=2, default=str),
@@ -986,15 +1255,61 @@ class PerplexityCouncil:
         )
         _log(f"Saved {len(cookies)} cookies to {self.session_path}")
 
+        # Also capture localStorage from Perplexity page
+        try:
+            pages = self.context.pages
+            pplx_page = None
+            for p in pages:
+                if "perplexity.ai" in (p.url or ""):
+                    pplx_page = p
+                    break
+            if not pplx_page and pages:
+                pplx_page = pages[0]
+
+            if pplx_page:
+                ls_data = await pplx_page.evaluate("""() => {
+                    const items = {};
+                    for (let i = 0; i < localStorage.length; i++) {
+                        const key = localStorage.key(i);
+                        items[key] = localStorage.getItem(key);
+                    }
+                    return items;
+                }""")
+                if ls_data:
+                    ls_path = BROWSER_LOCALSTORAGE_PATH
+                    ls_path.write_text(
+                        json.dumps(ls_data, indent=2, default=str),
+                        encoding="utf-8",
+                    )
+                    _log(f"Saved {len(ls_data)} localStorage items to {ls_path.name}")
+        except Exception as e:
+            _log(f"WARNING: Failed to capture localStorage: {e}")
+
     async def stop(self) -> None:
-        """Close browser and Playwright."""
+        """Close browser, Playwright, and clean up temp resources."""
         if self.context:
-            await self.context.close()
+            try:
+                await self.context.close()
+            except Exception:
+                pass
+        if self._browser:
+            try:
+                await self._browser.close()
+            except Exception:
+                pass
         if self.playwright:
             await self.playwright.stop()
-        # Safety net: release lock if still held (normally released in run() finally)
-        if hasattr(self, '_lock') and self._lock:
-            self._lock.release()
+        # Clean up temp profile dir (Cloudflare fallback)
+        if self._temp_profile_dir and Path(self._temp_profile_dir).exists():
+            try:
+                shutil.rmtree(self._temp_profile_dir, ignore_errors=True)
+                _log(f"Cleaned up temp profile: {self._temp_profile_dir}")
+            except Exception:
+                pass
+            self._temp_profile_dir = None
+        # Safety net: release semaphore if still held
+        if hasattr(self, '_semaphore') and self._semaphore:
+            self._semaphore.release()
 
 
 async def main() -> None:
@@ -1018,6 +1333,7 @@ async def main() -> None:
         timeout=args.timeout,
         save_artifacts=args.save_artifacts,
         perplexity_mode=args.perplexity_mode,
+        use_persistent=args.save_session,  # Persistent context only for --save-session
     )
 
     if args.save_session:

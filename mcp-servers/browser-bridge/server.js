@@ -1445,8 +1445,8 @@ class BrowserBridgeServer {
         if (isResearch) scriptArgs.push('--perplexity-mode', 'research');
         scriptArgs.push(query);
 
-        // Browser and auto modes need longer timeout (up to 3 min for Playwright)
-        const timeout = (mode === 'browser' || mode === 'auto') ? 210_000 : 150_000;
+        // Browser/auto modes need longer timeout; research mode needs even more (deep research does multiple rounds)
+        const timeout = isResearch ? 300_000 : (mode === 'browser' || mode === 'auto') ? 210_000 : 150_000;
         const result = execFileSync('python', scriptArgs, {
           timeout,
           encoding: 'utf-8',

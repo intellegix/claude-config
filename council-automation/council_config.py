@@ -98,6 +98,13 @@ BROWSER_USER_DATA_DIR = Path.home() / ".claude" / "config" / "playwright-chrome-
 BROWSER_SESSION_PATH = Path.home() / ".claude" / "config" / "playwright-session.json"
 SELECTORS_PATH = Path.home() / ".claude" / "perplexity-selectors.json"
 
+# --- Concurrent browser sessions ---
+MAX_CONCURRENT_SESSIONS = 3       # Max simultaneous Playwright browsers
+SEMAPHORE_TTL = 300               # seconds, auto-expire stale session slots
+SEMAPHORE_WAIT_TIMEOUT = 30       # seconds, wait for slot before BROWSER_BUSY
+BROWSER_SESSIONS_DIR = Path.home() / ".claude" / "config" / "browser-sessions"
+BROWSER_LOCALSTORAGE_PATH = Path.home() / ".claude" / "config" / "playwright-localstorage.json"
+
 # --- Vision monitoring (Claude Haiku for page state detection) ---
 VISION_MODEL = "claude-haiku-4-5-20251001"
 VISION_MAX_TOKENS = 300
