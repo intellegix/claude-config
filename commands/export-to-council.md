@@ -95,7 +95,13 @@ In plan mode:
    - Code changes needed
    - Dependency ordering (what must happen first)
    - Risk mitigations from the council findings
-   - **Second-to-last step: Update MEMORY.md** — synthesize key findings, new patterns, lessons learned, and architectural decisions from the council into the project's `MEMORY.md` file. Add new sections or update existing ones. Keep it concise — index-style entries with links to topic files for details. If MEMORY.md exceeds 200 lines, move detailed content into separate topic files under the memory directory.
+   - **Second-to-last step: Update project memory** — follow these 6 rules:
+     1. MEMORY.md stays under 150 lines — move implementation details to `memory/*.md` topic files
+     2. No duplication between MEMORY.md and CLAUDE.md — if it's a behavioral rule, it belongs in CLAUDE.md only
+     3. New session-learned patterns (bugs, gotchas, workarounds) go in MEMORY.md; implementation details go to topic files
+     4. Delete outdated entries rather than accumulating — check if existing content is superseded
+     5. If adding a new topic file, add a 1-line entry to the Topic File Index in MEMORY.md
+     6. Topic file naming: kebab-case.md
    - **ALWAYS end with a "Commit & Push" step** — the final step of every plan must commit all changes and push to remote
 5. Write the plan, then call `ExitPlanMode` for user approval
 
