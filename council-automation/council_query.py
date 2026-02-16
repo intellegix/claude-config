@@ -775,7 +775,10 @@ async def run_auto_query(query: str, context: str) -> dict:
     except Exception as e:
         print(f"Auto mode: API failed ({e}), falling back to browser...", file=sys.stderr)
 
-    return await run_browser_query(query, context)
+    result = await run_browser_query(query, context)
+    if result.get("code") == "BROWSER_BUSY":
+        print("Auto mode: browser busy (another session holds the lock)", file=sys.stderr)
+    return result
 
 
 def format_synthesis_output(results: dict) -> str:

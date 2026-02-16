@@ -1442,6 +1442,13 @@ class BrowserBridgeServer {
           env: { ...process.env },
           cwd: scriptDir,
         });
+        // Check for browser busy error (concurrent session holding the profile lock)
+        if (result.includes('BROWSER_BUSY')) {
+          return {
+            error: 'Another browser council/research session is active. Wait ~2 min or use --mode api.',
+            code: 'BROWSER_BUSY',
+          };
+        }
         return { synthesis: result };
       }
 

@@ -37,6 +37,64 @@ from council_config import (
 )
 
 
+class BrowserBusyError(Exception):
+    """Raised when another browser automation session holds the profile lock."""
+    pass
+
+
+class BrowserLock:
+    """Cross-platform file lock for Playwright browser profile serialization.
+
+    On Windows uses msvcrt.locking(), on Unix uses fcntl.flock().
+    Non-blocking: raises BrowserBusyError immediately if lock is held.
+    """
+    LOCK_PATH = Path.home() / ".claude" / "config" / "council_browser.lock"
+
+    def __init__(self):
+        self.LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+        self._fd = None
+
+    def acquire(self):
+        self._fd = open(self.LOCK_PATH, 'w')
+        self._fd.write(f"{os.getpid()} {time.time():.0f}\n")
+        self._fd.flush()
+        try:
+            if sys.platform == 'win32':
+                import msvcrt
+                msvcrt.locking(self._fd.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self._fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (IOError, OSError):
+            self._fd.close()
+            self._fd = None
+            raise BrowserBusyError(
+                "Another council/research browser session is already running. "
+                "Wait for it to finish (~1-3 min) or use --mode api."
+            )
+
+    def release(self):
+        if self._fd:
+            try:
+                if sys.platform == 'win32':
+                    import msvcrt
+                    msvcrt.locking(self._fd.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(self._fd.fileno(), fcntl.LOCK_UN)
+            except Exception:
+                pass
+            self._fd.close()
+            self._fd = None
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *args):
+        self.release()
+
+
 def _log(msg: str) -> None:
     """Log to stderr (stdout reserved for JSON result)."""
     print(f"  [browser] {msg}", file=sys.stderr)
@@ -822,6 +880,16 @@ class PerplexityCouncil:
         """Full pipeline: start -> validate -> council -> query -> wait -> extract."""
         start_time = time.time()
         self._init_artifact_dir(query)
+        self._lock = BrowserLock()
+
+        try:
+            self._lock.acquire()
+        except BrowserBusyError as e:
+            return {
+                "error": str(e),
+                "code": "BROWSER_BUSY",
+                "step": "lock",
+            }
 
         try:
             _log("Starting Playwright browser...")
@@ -889,6 +957,8 @@ class PerplexityCouncil:
                 "step": "unknown",
                 "execution_time_ms": int((time.time() - start_time) * 1000),
             }
+        finally:
+            self._lock.release()
 
     async def save_session(self) -> None:
         """Save current browser session for future headless use."""
@@ -912,6 +982,9 @@ class PerplexityCouncil:
             await self.context.close()
         if self.playwright:
             await self.playwright.stop()
+        # Safety net: release lock if still held (normally released in run() finally)
+        if hasattr(self, '_lock') and self._lock:
+            self._lock.release()
 
 
 async def main() -> None:
