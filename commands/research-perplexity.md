@@ -74,6 +74,7 @@ In plan mode:
    - Code changes needed
    - Dependency ordering (what must happen first)
    - Risk mitigations from the research findings
+   - **Second-to-last step: Update MEMORY.md** — synthesize key findings, new patterns, lessons learned, and architectural decisions from the research into the project's `MEMORY.md` file. Add new sections or update existing ones. Keep it concise — index-style entries with links to topic files for details. If MEMORY.md exceeds 200 lines, move detailed content into separate topic files under the memory directory.
    - **ALWAYS end with a "Commit & Push" step** — the final step of every plan must commit all changes and push to remote
 5. Write the plan, then call `ExitPlanMode` for user approval
 
