@@ -704,11 +704,12 @@ class PerplexityCouncil:
         """Extract synthesis and per-model responses from the page.
 
         DOM structure (validated 2026-02-16):
-          - Synthesis: first div.prose.inline element
-          - Model cards: 3x div.overflow-hidden.rounded-xl.border-subtler
-            - Each has a cursor-pointer clickable header
-            - Model name in div.font-medium.text-xs.text-foreground
-            - Clicking opens a data-state='active' slide-out panel on right
+          Council mode:
+            - Synthesis: first div.prose.inline element
+            - Model cards: 3x div.overflow-hidden.rounded-xl.border-subtler
+          Research mode:
+            - Full report: div.prose.max-w-none (right panel with detailed sections)
+            - Intro summary: first div.prose.inline (left panel, shorter)
         """
         results = {
             "synthesis": "",
@@ -716,25 +717,46 @@ class PerplexityCouncil:
             "citations": [],
         }
 
-        # Extract synthesis text
-        synthesis_sel = self.selectors.get("councilSynthesis", "div.prose.inline")
-        synthesis_fallback = self.selectors.get("councilSynthesisFallback", ".prose:first-of-type")
-        try:
-            text = await page.evaluate(
-                f'document.querySelector("{synthesis_sel}")?.innerText || ""'
-            )
-            if not text:
+        # Extract synthesis/report text — different selectors per mode
+        if self.perplexity_mode == "research":
+            # Research mode: full report is in the right panel (prose.max-w-none)
+            try:
+                text = await page.evaluate("""() => {
+                    // Primary: right panel with full research report
+                    const report = document.querySelector('div.prose.max-w-none');
+                    if (report && report.innerText.length > 100) return report.innerText;
+                    // Fallback: find the largest prose element on the page
+                    const proses = Array.from(document.querySelectorAll('div.prose'));
+                    if (proses.length === 0) return '';
+                    proses.sort((a, b) => b.innerText.length - a.innerText.length);
+                    return proses[0].innerText || '';
+                }""")
+                results["synthesis"] = text
+                _log(f"Extracted research report: {len(results['synthesis'])} chars")
+            except Exception as e:
+                _log(f"WARNING: Failed to extract research report: {e}")
+        else:
+            # Council mode: synthesis is in div.prose.inline
+            synthesis_sel = self.selectors.get("councilSynthesis", "div.prose.inline")
+            synthesis_fallback = self.selectors.get("councilSynthesisFallback", ".prose:first-of-type")
+            try:
                 text = await page.evaluate(
-                    f'document.querySelector("{synthesis_fallback}")?.innerText || ""'
+                    f'document.querySelector("{synthesis_sel}")?.innerText || ""'
                 )
-            results["synthesis"] = text
-            _log(f"Extracted synthesis: {len(results['synthesis'])} chars")
-        except Exception as e:
-            _log(f"WARNING: Failed to extract synthesis: {e}")
+                if not text:
+                    text = await page.evaluate(
+                        f'document.querySelector("{synthesis_fallback}")?.innerText || ""'
+                    )
+                results["synthesis"] = text
+                _log(f"Extracted synthesis: {len(results['synthesis'])} chars")
+            except Exception as e:
+                _log(f"WARNING: Failed to extract synthesis: {e}")
 
-        # Find model cards
-        cards = await self._find_model_cards(page)
-        _log(f"Found {len(cards)} model cards")
+        # Find model cards (council mode only — research mode has no model cards)
+        cards = []
+        if self.perplexity_mode != "research":
+            cards = await self._find_model_cards(page)
+            _log(f"Found {len(cards)} model cards")
 
         # Extract per-model responses by clicking each card
         for i, card in enumerate(cards):
@@ -901,6 +923,8 @@ async def main() -> None:
     parser.add_argument("--session-path", type=str, help="Path to session file")
     parser.add_argument("--save-artifacts", action="store_true", default=False,
         help="Save screenshots/HTML on failure (default: True when --opus-synthesis)")
+    parser.add_argument("--perplexity-mode", choices=["council", "research"], default="council",
+        help="Perplexity slash command: /council (multi-model) or /research (deep research)")
 
     args = parser.parse_args()
 
@@ -910,6 +934,7 @@ async def main() -> None:
         session_path=session_path,
         timeout=args.timeout,
         save_artifacts=args.save_artifacts,
+        perplexity_mode=args.perplexity_mode,
     )
 
     if args.save_session:
