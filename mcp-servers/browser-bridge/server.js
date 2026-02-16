@@ -30,6 +30,19 @@ import { writeFileSync, readFileSync, mkdirSync, existsSync } from 'node:fs';
 import { basename, dirname, join, resolve as pathResolve } from 'node:path';
 import { homedir } from 'node:os';
 import { execFileSync, spawn } from 'node:child_process';
+import { appendFileSync } from 'node:fs';
+
+// ---------------------------------------------------------------------------
+// Debug logging — writes to ~/.claude/mcp-debug.log for crash diagnostics
+// ---------------------------------------------------------------------------
+
+const _debugLogPath = join(homedir(), '.claude', 'mcp-debug.log');
+function _debugLog(msg) {
+  try {
+    appendFileSync(_debugLogPath, `${new Date().toISOString()} [PID:${process.pid}] ${msg}\n`);
+  } catch (_) { /* ignore */ }
+}
+_debugLog(`imports OK — cwd=${process.cwd()} argv=${process.argv.join(' ')} ppid=${process.ppid}`);
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -610,6 +623,7 @@ class WebSocketBridge extends EventEmitter {
 
 class BrowserBridgeServer {
   constructor() {
+    _debugLog('constructor entered');
     this.contextManager = new ContextManager();
     this.bridge = new WebSocketBridge();
     this.healthServer = null;
@@ -624,6 +638,7 @@ class BrowserBridgeServer {
     this._registerTools();
     this._registerResources();
     this._registerBridgeEvents();
+    _debugLog(`constructor OK — sessionId=${this.sessionId} project=${this.projectLabel}`);
   }
 
   /** Inject sessionId and projectLabel into a payload object for tab group routing */
@@ -1581,6 +1596,7 @@ class BrowserBridgeServer {
   // -----------------------------------------------------------------------
 
   _connectAsRelay() {
+    _debugLog(`_connectAsRelay() entered — target ws://${CONFIG.wsHost}:${CONFIG.wsPort}`);
     return new Promise((resolve, reject) => {
       const wsUrl = `ws://${CONFIG.wsHost}:${CONFIG.wsPort}`;
       this._relayWs = null;
@@ -1589,11 +1605,13 @@ class BrowserBridgeServer {
       this._relayConnected = false;
 
       const connect = (isInitial = false) => {
+        _debugLog(`_connectAsRelay() connect() isInitial=${isInitial}`);
         const ws = new WebSocket(wsUrl, { maxPayload: CONFIG.maxMessageSize });
 
         ws.on('open', () => {
           this._relayWs = ws;
           this._relayConnected = true;
+          _debugLog('_connectAsRelay() WS open — sending relay_init');
           console.error('[BrowserBridge] Relay connected to primary WS server');
 
           // Identify as relay, not browser extension — include sessionId for cleanup on disconnect
@@ -1643,6 +1661,7 @@ class BrowserBridgeServer {
         });
 
         ws.on('error', (err) => {
+          _debugLog(`_connectAsRelay() WS error: ${err.code || err.message} isInitial=${isInitial} connected=${this._relayConnected}`);
           console.error('[BrowserBridge] Relay WS error:', err.message);
           if (isInitial && !this._relayConnected) {
             reject(err);
@@ -1654,14 +1673,19 @@ class BrowserBridgeServer {
 
       // --- Relay death detection ---
       // Strategy 1: stdin close (primary — OS closes pipe when parent dies)
+      // NOTE: Do NOT call process.stdin.resume() here! StdioServerTransport
+      // reads MCP messages from stdin. Calling resume() before the transport
+      // is connected puts stdin into flowing mode, discarding the MCP
+      // initialize handshake. The 'end'/'close' listeners work because
+      // StdioServerTransport resumes stdin when it starts reading.
       const stdinCleanup = () => {
+        _debugLog('relay stdin closed — parent exited');
         console.error('[BrowserBridge] Relay stdin closed — parent exited, shutting down');
         clearTimeout(this._relayReconnectTimer);
         if (this._ppidCheckTimer) clearInterval(this._ppidCheckTimer);
         if (this._relayWs) this._relayWs.close(1000, 'Parent process exited');
         process.exit(0);
       };
-      process.stdin.resume();
       process.stdin.on('end', stdinCleanup);
       process.stdin.on('close', stdinCleanup);
 
@@ -1725,25 +1749,33 @@ class BrowserBridgeServer {
 
   async start() {
     const isStandalone = process.argv.includes('--standalone');
+    _debugLog(`start() entered — standalone=${isStandalone}`);
 
     try {
       await this.bridge.start();
       await this._startHealthServer();
+      _debugLog('start() primary mode — WS+Health bound OK');
       console.error('[BrowserBridge] Primary mode — owns WebSocket + Health servers');
     } catch (err) {
       if (err.code === 'EADDRINUSE' && !isStandalone) {
+        _debugLog(`start() EADDRINUSE — switching to relay mode`);
         console.error('[BrowserBridge] Ports in use — connecting as relay client');
         await this._connectAsRelay();
+        _debugLog('start() relay connected OK');
       } else {
+        _debugLog(`start() FATAL bind error: ${err.code || err.message}`);
         throw err;
       }
     }
 
     if (!isStandalone) {
+      _debugLog('start() connecting MCP stdio transport...');
       const transport = new StdioServerTransport();
       await this.server.connect(transport);
+      _debugLog('start() MCP stdio connected — server ready');
       console.error('[BrowserBridge] MCP server started (stdio transport)');
     } else {
+      _debugLog('start() standalone mode — no stdio');
       console.error('[BrowserBridge] Running in standalone mode (WebSocket + Health only)');
     }
   }
@@ -1790,6 +1822,7 @@ class BrowserBridgeServer {
 // Main entry point
 // ---------------------------------------------------------------------------
 
+_debugLog('creating BrowserBridgeServer instance...');
 const serverInstance = new BrowserBridgeServer();
 
 async function main() {
@@ -1798,6 +1831,7 @@ async function main() {
 
 // Graceful shutdown
 function handleShutdown(signal) {
+  _debugLog(`shutdown signal: ${signal}`);
   console.error(`\n[BrowserBridge] Received ${signal}, shutting down...`);
   serverInstance.shutdown().then(() => process.exit(0)).catch(() => process.exit(1));
 }
@@ -1805,13 +1839,16 @@ function handleShutdown(signal) {
 process.on('SIGINT', () => handleShutdown('SIGINT'));
 process.on('SIGTERM', () => handleShutdown('SIGTERM'));
 process.on('uncaughtException', (err) => {
+  _debugLog(`UNCAUGHT: ${err.stack || err.message}`);
   console.error('[BrowserBridge] Uncaught exception:', err);
 });
 process.on('unhandledRejection', (err) => {
+  _debugLog(`UNHANDLED_REJECTION: ${err?.stack || err?.message || err}`);
   console.error('[BrowserBridge] Unhandled rejection:', err);
 });
 
 main().catch((err) => {
+  _debugLog(`main() FATAL: ${err.stack || err.message}`);
   console.error('[BrowserBridge] Fatal error:', err);
   process.exit(1);
 });

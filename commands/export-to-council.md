@@ -79,6 +79,7 @@ In plan mode:
    - Code changes needed
    - Dependency ordering (what must happen first)
    - Risk mitigations from the council findings
+   - **ALWAYS end with a "Commit & Push" step** — the final step of every plan must commit all changes and push to remote
 5. Write the plan, then call `ExitPlanMode` for user approval
 
 The plan should directly translate the council's strategic recommendations into executable implementation steps. Don't just summarize the council — turn it into a buildable plan.

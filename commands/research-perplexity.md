@@ -15,17 +15,18 @@ Run a deep research query using Perplexity's `/research` mode via Playwright bro
 Compose the query from session context + the user's research question:
 
 ```
-You are a technical research analyst. Given the project context (provided as system context), perform deep research on the following topic.
+You are a development strategy advisor analyzing a coding session. Given the project context (provided as system context), provide strategic analysis and concrete next steps.
 
-RESEARCH TOPIC: {$ARGUMENTS or "Analyze the current project architecture and identify the most impactful improvements based on recent industry best practices."}
+FOCUS AREA: {$ARGUMENTS or "general next steps — what should be the priority?"}
 
-Please provide:
-1. KEY FINDINGS: Main discoveries from your research with citations
-2. CURRENT BEST PRACTICES: What the industry recommends in 2025-2026
-3. APPLICABILITY: How these findings apply to the specific project context
-4. ACTIONABLE RECOMMENDATIONS: 3-5 concrete steps in priority order
-5. TRADE-OFFS: What are the downsides or risks of each recommendation
-6. SOURCES: Key references and their credibility
+Please analyze and respond with:
+1. CURRENT STATE: What has been accomplished based on the project context
+2. PROGRESS VS PLAN: How does the work align with the project's implementation plan?
+3. IMMEDIATE NEXT STEPS: 3-5 concrete actions in priority order, with specific file paths and code changes
+4. BLOCKERS: Any issues that need resolution before proceeding
+5. TECHNICAL DEBT: Items that should be addressed soon
+6. STRATEGIC RECOMMENDATIONS: Longer-term suggestions for the project direction
+7. RISKS: What could go wrong with the recommended path, and mitigations
 ```
 
 ### Step 2: Run research query
@@ -51,8 +52,14 @@ The `research_query` response contains the Perplexity synthesis. Present the key
 In plan mode:
 1. Read relevant project files identified in the research findings
 2. Cross-reference recommendations against the current codebase
-3. Create a concrete implementation plan
-4. Write the plan, then call `ExitPlanMode` for user approval
+3. Identify which recommendations are actionable now vs. need prerequisites
+4. Create a concrete implementation plan with:
+   - Specific files to create/modify
+   - Code changes needed
+   - Dependency ordering (what must happen first)
+   - Risk mitigations from the research findings
+   - **ALWAYS end with a "Commit & Push" step** — the final step of every plan must commit all changes and push to remote
+5. Write the plan, then call `ExitPlanMode` for user approval
 
 ## Key Differences from /export-to-council
 - Uses Perplexity `/research` mode instead of `/council` (multi-model)
