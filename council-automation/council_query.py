@@ -886,7 +886,7 @@ def format_synthesis_output(results: dict) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Hybrid council query engine")
     parser.add_argument("query", nargs="?", help="The question to ask the council")
-    parser.add_argument("--mode", choices=["api", "direct", "browser", "auto"], default="api")
+    parser.add_argument("--mode", choices=["api", "direct", "browser", "auto"], default="browser")
     parser.add_argument("--context-file", help="Path to session context file")
     parser.add_argument("--read", action="store_true", help="Read cached synthesis")
     parser.add_argument("--read-full", action="store_true", help="Read full cached results")

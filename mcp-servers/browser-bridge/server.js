@@ -989,12 +989,12 @@ class BrowserBridgeServer {
         },
         {
           name: 'council_query',
-          description: 'Query 3 AI models (GPT-5.2, Claude Sonnet 4.5, Gemini 3 Pro) via Perplexity API with web search, then synthesize with Opus 4.6 extended thinking. Runs externally as subprocess — zero context tokens during execution. Results cached to ~/.claude/council-cache/. Returns synthesis only (~3-5K tokens). Cost: ~$0.06-0.20 per query.',
+          description: 'Query 3 AI models (GPT-5.2, Claude Sonnet 4.5, Gemini 3 Pro) via Perplexity API or Playwright browser automation, then synthesize. Runs externally as subprocess — zero context tokens during execution. Results cached to ~/.claude/council-cache/. Returns synthesis only (~3-5K tokens). Default mode: browser ($0, uses Perplexity login).',
           inputSchema: {
             type: 'object',
             properties: {
               query: { type: 'string', description: 'The question or analysis request for the multi-model council' },
-              mode: { type: 'string', enum: ['api', 'direct', 'browser', 'auto'], description: 'Query mode. api: Perplexity API + Opus synthesis (fast, ~20s). direct: Provider APIs directly. browser: Playwright UI automation (reliable, ~90s). auto: try api, fallback to browser. Default: api.' },
+              mode: { type: 'string', enum: ['api', 'direct', 'browser', 'auto'], description: 'Query mode. browser: Playwright UI automation (reliable, ~90s, $0). api: Perplexity API + Opus synthesis (fast, ~20s, requires API keys). direct: Provider APIs directly. auto: try api, fallback to browser. Default: browser.' },
               includeContext: { type: 'boolean', description: 'Include project context (git log, CLAUDE.md, MEMORY.md). Default: true.' },
               headful: { type: 'boolean', description: 'Run browser in visible mode (browser/auto modes only). Default: false.' },
               opusSynthesis: { type: 'boolean', description: 'Run Opus 4.6 re-synthesis on browser results (requires ANTHROPIC_API_KEY). Default: false.' },
@@ -1412,8 +1412,8 @@ class BrowserBridgeServer {
         const query = Validator.text(args.query, 10_000);
         const isResearch = name === 'research_query';
         const validModes = ['api', 'direct', 'browser', 'auto'];
-        // research_query always uses browser mode (Playwright + /research slash cmd)
-        const mode = isResearch ? 'browser' : (validModes.includes(args.mode) ? args.mode : 'api');
+        // Default to browser mode (no API keys needed). research_query always uses browser.
+        const mode = isResearch ? 'browser' : (validModes.includes(args.mode) ? args.mode : 'browser');
         const includeContext = Validator.boolean(args.includeContext, true);
         const scriptDir = join(homedir(), '.claude', 'council-automation');
         const cacheDir = join(homedir(), '.claude', 'council-cache');

@@ -25,7 +25,7 @@ ANALYSIS_MODELS = [
 # Only Sonar models are available via chat/completions.
 # Loses multi-model diversity but gains reliability.
 FALLBACK_MODEL = "sonar-pro"
-FALLBACK_ENABLED = True  # Auto-fallback when Responses API times out
+FALLBACK_ENABLED = False  # Disabled — browser mode is primary, no API fallback
 
 # --- Synthesis model (Anthropic API direct) ---
 SYNTHESIS_MODEL = "claude-opus-4-6"
@@ -61,7 +61,7 @@ MAX_OUTPUT_TOKENS = 4096
 # --- Direct provider fallback (Tier 3) ---
 # When both Perplexity Responses API and Sonar are down, call providers directly.
 # Loses web search/citations but preserves multi-model diversity.
-DIRECT_PROVIDERS_ENABLED = True
+DIRECT_PROVIDERS_ENABLED = False  # Disabled — browser mode is primary
 
 # Perplexity model ID → native provider model ID
 DIRECT_MODEL_MAP = {
