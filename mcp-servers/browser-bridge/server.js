@@ -30,13 +30,24 @@ import { writeFileSync, readFileSync, mkdirSync, existsSync } from 'node:fs';
 import { basename, dirname, join, resolve as pathResolve } from 'node:path';
 import { homedir } from 'node:os';
 import { execFileSync, spawn } from 'node:child_process';
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, existsSync as fsExistsSync, statSync, unlinkSync, renameSync } from 'node:fs';
 
 // ---------------------------------------------------------------------------
 // Debug logging — writes to ~/.claude/mcp-debug.log for crash diagnostics
 // ---------------------------------------------------------------------------
 
 const _debugLogPath = join(homedir(), '.claude', 'mcp-debug.log');
+
+// Rotate log if > 5MB (runs once per startup)
+const _MAX_LOG_SIZE = 5 * 1024 * 1024;
+try {
+  if (fsExistsSync(_debugLogPath) && statSync(_debugLogPath).size > _MAX_LOG_SIZE) {
+    const oldPath = _debugLogPath + '.old';
+    if (fsExistsSync(oldPath)) unlinkSync(oldPath);
+    renameSync(_debugLogPath, oldPath);
+  }
+} catch (_) { /* ignore rotation errors */ }
+
 function _debugLog(msg) {
   try {
     appendFileSync(_debugLogPath, `${new Date().toISOString()} [PID:${process.pid}] ${msg}\n`);

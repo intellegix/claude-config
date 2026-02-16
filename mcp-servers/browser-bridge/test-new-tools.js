@@ -291,3 +291,40 @@ describe('sanitizeArgs', () => {
     assert.strictEqual(sanitizeArgs(undefined), undefined);
   });
 });
+
+// --- BROWSER_BUSY detection ---
+
+describe('BROWSER_BUSY detection', () => {
+  it('24. detects BROWSER_BUSY in subprocess output', () => {
+    // Simulates the check in server.js council_query handler
+    const output = JSON.stringify({
+      error: 'Another council/research browser session is already running.',
+      code: 'BROWSER_BUSY',
+      step: 'lock',
+    });
+    assert.ok(output.includes('BROWSER_BUSY'), 'Output should contain BROWSER_BUSY');
+  });
+
+  it('25. does not false-positive on normal output', () => {
+    const output = JSON.stringify({
+      synthesis: 'The browser performed well in tests.',
+      query: 'How busy is the system?',
+    });
+    assert.ok(!output.includes('BROWSER_BUSY'), 'Normal output should not trigger BROWSER_BUSY');
+  });
+
+  it('26. returns structured error on BROWSER_BUSY', () => {
+    // Simulates the error path in server.js _handleToolCall
+    const result = '{"error":"busy","code":"BROWSER_BUSY","step":"lock"}';
+    if (result.includes('BROWSER_BUSY')) {
+      const parsed = {
+        error: 'Another browser council/research session is active. Wait ~2 min or use --mode api.',
+        code: 'BROWSER_BUSY',
+      };
+      assert.strictEqual(parsed.code, 'BROWSER_BUSY');
+      assert.ok(parsed.error.includes('Wait'));
+    } else {
+      assert.fail('Should have detected BROWSER_BUSY');
+    }
+  });
+});

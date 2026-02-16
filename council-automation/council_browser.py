@@ -55,9 +55,18 @@ class BrowserLock:
         self._fd = None
 
     def acquire(self):
-        self._fd = open(self.LOCK_PATH, 'w')
-        self._fd.write(f"{os.getpid()} {time.time():.0f}\n")
-        self._fd.flush()
+        try:
+            self._fd = open(self.LOCK_PATH, 'w')
+            self._fd.write(f"{os.getpid()} {time.time():.0f}\n")
+            self._fd.flush()
+            self._fd.seek(0)  # msvcrt.locking locks from current position — must be consistent
+        except PermissionError:
+            # On Windows, open('w') truncation fails if another process holds a lock
+            self._fd = None
+            raise BrowserBusyError(
+                "Another council/research browser session is already running. "
+                "Wait for it to finish (~1-3 min) or use --mode api."
+            )
         try:
             if sys.platform == 'win32':
                 import msvcrt
@@ -76,6 +85,7 @@ class BrowserLock:
     def release(self):
         if self._fd:
             try:
+                self._fd.seek(0)  # Must match the lock position from acquire()
                 if sys.platform == 'win32':
                     import msvcrt
                     msvcrt.locking(self._fd.fileno(), msvcrt.LK_UNLCK, 1)

@@ -13,6 +13,16 @@ const { pathToFileURL } = require('url');
 
 const debugLogPath = path.join(os.homedir(), '.claude', 'mcp-debug.log');
 
+// Rotate log if > 5MB (runs once per startup)
+const MAX_LOG_SIZE = 5 * 1024 * 1024;
+try {
+  if (fs.existsSync(debugLogPath) && fs.statSync(debugLogPath).size > MAX_LOG_SIZE) {
+    const oldPath = debugLogPath + '.old';
+    if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+    fs.renameSync(debugLogPath, oldPath);
+  }
+} catch (_) { /* ignore rotation errors */ }
+
 function debugLog(msg) {
   try {
     fs.appendFileSync(debugLogPath, `${new Date().toISOString()} [PID:${process.pid}] ${msg}\n`);
