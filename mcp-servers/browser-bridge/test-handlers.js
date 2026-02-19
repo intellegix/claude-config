@@ -141,10 +141,11 @@ function routeToolCall(name, args) {
     case 'browser_press_key': {
       const key = Validator.key(args.key);
       const selector = args.selector ? Validator.selector(args.selector) : undefined;
+      const modifiers = args.modifiers ? Validator.object(args.modifiers, 'modifiers') : undefined;
       const tabId = Validator.tabId(args.tabId);
       return {
         broadcastType: 'action_request',
-        broadcastPayload: withSession({ action: 'pressKey', key, selector, modifiers: args.modifiers, tabId }),
+        broadcastPayload: withSession({ action: 'pressKey', key, selector, modifiers, tabId }),
         broadcastTimeout: CONFIG_requestTimeout,
       };
     }
@@ -357,6 +358,18 @@ describe('Tool Handler Routing', () => {
       assert.equal(result.broadcastType, 'action_request');
       assert.equal(result.broadcastPayload.action, 'pressKey');
       assert.equal(result.broadcastPayload.key, 'Enter');
+    });
+
+    it('browser_press_key passes validated modifiers object', () => {
+      const result = routeToolCall('browser_press_key', { key: 'a', modifiers: { ctrl: true, shift: false } });
+      assert.deepEqual(result.broadcastPayload.modifiers, { ctrl: true, shift: false });
+    });
+
+    it('browser_press_key rejects non-object modifiers', () => {
+      assert.throws(
+        () => routeToolCall('browser_press_key', { key: 'a', modifiers: 'ctrl' }),
+        /modifiers must be a non-empty object/
+      );
     });
 
     it('browser_wait_for_stable timeout = actionTimeout + 5000', () => {

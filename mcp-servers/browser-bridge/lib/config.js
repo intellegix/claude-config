@@ -21,6 +21,28 @@ export const CONFIG = {
   dbPath: process.env.MCP_DB_PATH || ':memory:',
   cleanupInterval: 300_000, // 5 min
   relayIdleTtl: 900_000, // 15 minutes — evict idle relay clients
+
+  // Tool broadcast timeouts (ms)
+  timeouts: {
+    quick: 5_000,              // get_context, session_cleanup, close_tabs, clear_console
+    interactive: 10_000,       // handle_dialog
+    councilExec: 10_000,       // execFileSync for council_metrics, council_read, session_context
+    councilUi: 15_000,         // activate_council, export_council_md
+    space: 20_000,             // add_to_space
+    heavy: 30_000,             // screenshot_element, evaluate, insertText
+    fullPage: 120_000,         // screenshot_full_page
+    councilApi: 150_000,       // council_query --mode api
+    councilBrowser: 210_000,   // council_query --mode browser
+    councilResearch: 420_000,  // research_query
+  },
+
+  // Relay-specific timeouts
+  relayReconnectDelay: 3_000,
+  ppidPollInterval: 10_000,
+
+  // WS bridge zombie/reconnect detection
+  appMsgTimeout: 45_000,         // zombie detection: 2 missed 20s keepalives
+  waitForBrowserTimeout: 5_000,  // max wait for browser client reconnect
 };
 
 // ---------------------------------------------------------------------------

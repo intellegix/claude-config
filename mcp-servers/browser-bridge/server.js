@@ -529,7 +529,7 @@ class BrowserBridgeServer {
         try {
           const live = await this.bridge.broadcast(
             { type: 'get_context', payload: this._withSession({ tabId }) },
-            5000,
+            CONFIG.timeouts.quick,
           );
           return live;
         } catch {
@@ -554,10 +554,10 @@ class BrowserBridgeServer {
 
         if (fullPage) {
           broadcastType = 'screenshot_full_page';
-          timeout = 120_000;
+          timeout = CONFIG.timeouts.fullPage;
         } else if (selector) {
           broadcastType = 'screenshot_element';
-          timeout = 30_000;
+          timeout = CONFIG.timeouts.heavy;
         }
 
         const result = await this.bridge.broadcast(
@@ -675,7 +675,7 @@ class BrowserBridgeServer {
       case 'browser_close_session':
         return this.bridge.broadcast(
           { type: 'session_cleanup', payload: this._withSession({}) },
-          5000,
+          CONFIG.timeouts.quick,
         );
 
       case 'browser_close_tabs': {
@@ -683,7 +683,7 @@ class BrowserBridgeServer {
         tabIds.forEach((id, i) => { if (typeof id !== 'number' || id <= 0) throw new Error(`tabIds[${i}] must be a positive number`); });
         return this.bridge.broadcast(
           { type: 'close_tabs', payload: this._withSession({ tabIds }) },
-          5000,
+          CONFIG.timeouts.quick,
         );
       }
 
@@ -706,7 +706,7 @@ class BrowserBridgeServer {
             type: 'evaluate',
             payload: this._withSession({ expression, tabId, returnByValue }),
           },
-          30_000,
+          CONFIG.timeouts.heavy,
         );
       }
 
@@ -727,7 +727,7 @@ class BrowserBridgeServer {
                 expression: 'window.__claudeConsoleMessages = []; true;',
                 tabId,
               }),
-            }, 5000);
+            }, CONFIG.timeouts.quick);
           } catch { /* non-fatal */ }
         }
         return result;
@@ -736,10 +736,11 @@ class BrowserBridgeServer {
       case 'browser_press_key': {
         const key = Validator.key(args.key);
         const selector = args.selector ? Validator.selector(args.selector) : undefined;
+        const modifiers = args.modifiers ? Validator.object(args.modifiers, 'modifiers') : undefined;
         const tabId = Validator.tabId(args.tabId);
         return this.bridge.broadcast({
           type: 'action_request',
-          payload: this._withSession({ action: 'pressKey', key, selector, modifiers: args.modifiers, tabId }),
+          payload: this._withSession({ action: 'pressKey', key, selector, modifiers, tabId }),
         });
       }
 
@@ -752,7 +753,7 @@ class BrowserBridgeServer {
             type: 'handle_dialog',
             payload: this._withSession({ action, text, tabId }),
           },
-          10_000,
+          CONFIG.timeouts.interactive,
         );
       }
 
@@ -766,7 +767,7 @@ class BrowserBridgeServer {
             type: 'action_request',
             payload: this._withSession({ action: 'insertText', selector, text, append, tabId }),
           },
-          30_000,
+          CONFIG.timeouts.heavy,
         );
       }
 
@@ -775,7 +776,7 @@ class BrowserBridgeServer {
         const selector = args.selector ? Validator.selector(args.selector) : undefined;
         const delay = Validator.timeout(args.delay, 0, 1000, 50);
         const tabId = Validator.tabId(args.tabId);
-        const timeout = Math.max(15_000, text.length * (delay + 100));
+        const timeout = Math.max(CONFIG.timeouts.councilUi, text.length * (delay + 100));
         return this.bridge.broadcast(
           {
             type: 'cdp_type',
@@ -804,7 +805,7 @@ class BrowserBridgeServer {
         const tabId = Validator.tabId(args.tabId);
         return this.bridge.broadcast(
           { type: 'activate_council', payload: this._withSession({ tabId }) },
-          15_000,
+          CONFIG.timeouts.councilUi,
         );
       }
 
@@ -812,7 +813,7 @@ class BrowserBridgeServer {
         const tabId = Validator.tabId(args.tabId);
         return this.bridge.broadcast(
           { type: 'export_council_md', payload: this._withSession({ tabId }) },
-          15_000,
+          CONFIG.timeouts.councilUi,
         );
       }
 
@@ -822,7 +823,7 @@ class BrowserBridgeServer {
         const createIfMissing = Validator.boolean(args.createIfMissing);
         return this.bridge.broadcast(
           { type: 'add_to_space', payload: this._withSession({ tabId, spaceName, createIfMissing }) },
-          20_000,
+          CONFIG.timeouts.space,
         );
       }
 
@@ -844,7 +845,7 @@ class BrowserBridgeServer {
         if (includeContext) {
           try {
             const ctxOut = execFileSync('python', [join(scriptDir, 'session_context.py'), process.cwd()], {
-              timeout: 10_000,
+              timeout: CONFIG.timeouts.councilExec,
               encoding: 'utf-8',
               env: { ...process.env },
             });
@@ -859,13 +860,15 @@ class BrowserBridgeServer {
         if (includeContext && existsSync(join(cacheDir, 'session_context.md'))) {
           scriptArgs.push('--context-file', join(cacheDir, 'session_context.md'));
         }
-        if (args.headful) scriptArgs.push('--headful');
-        if (args.opusSynthesis) scriptArgs.push('--opus-synthesis');
+        const headful = Validator.boolean(args.headful);
+        const opusSynthesis = Validator.boolean(args.opusSynthesis);
+        if (headful) scriptArgs.push('--headful');
+        if (opusSynthesis) scriptArgs.push('--opus-synthesis');
         if (isResearch) scriptArgs.push('--perplexity-mode', 'research');
         scriptArgs.push(query);
 
         // Browser/auto modes need longer timeout; research mode needs even more (deep research takes 2-4 min)
-        const timeout = isResearch ? 420_000 : (mode === 'browser' || mode === 'auto') ? 210_000 : 150_000;
+        const timeout = isResearch ? CONFIG.timeouts.councilResearch : (mode === 'browser' || mode === 'auto') ? CONFIG.timeouts.councilBrowser : CONFIG.timeouts.councilApi;
         const result = execFileSync('python', scriptArgs, {
           timeout,
           encoding: 'utf-8',
@@ -887,7 +890,7 @@ class BrowserBridgeServer {
         const result = execFileSync('python', [
           join(scriptDir, 'council_metrics.py'), '--json',
         ], {
-          timeout: 10_000,
+          timeout: CONFIG.timeouts.councilExec,
           encoding: 'utf-8',
           env: { ...process.env },
           cwd: scriptDir,
@@ -904,7 +907,7 @@ class BrowserBridgeServer {
           level === 'full' ? '--read-full' : level === 'synthesis' ? '--read' : '--read-model',
           ...(level !== 'full' && level !== 'synthesis' ? [level] : []),
         ], {
-          timeout: 10_000,
+          timeout: CONFIG.timeouts.councilExec,
           encoding: 'utf-8',
           env: { ...process.env },
           cwd: scriptDir,
@@ -1091,7 +1094,7 @@ class BrowserBridgeServer {
             pending.reject(new Error('Relay connection lost'));
           }
           this._relayPending.clear();
-          this._relayReconnectTimer = setTimeout(() => connect(false), 3000);
+          this._relayReconnectTimer = setTimeout(() => connect(false), CONFIG.relayReconnectDelay);
         });
 
         ws.on('error', (err) => {
@@ -1137,7 +1140,7 @@ class BrowserBridgeServer {
             process.exit(0);
           }
         }
-      }, 10_000);
+      }, CONFIG.ppidPollInterval);
 
       // Override bridge.broadcast to relay through the primary server
       const originalBroadcast = this.bridge.broadcast.bind(this.bridge);
@@ -1223,7 +1226,7 @@ class BrowserBridgeServer {
     try {
       await this.bridge.broadcast(
         { type: 'session_cleanup', payload: this._withSession({}) },
-        3000,
+        CONFIG.timeouts.quick,
       );
     } catch { /* extension may not be connected */ }
 

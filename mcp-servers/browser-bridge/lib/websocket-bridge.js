@@ -195,7 +195,7 @@ export class WebSocketBridge extends EventEmitter {
    * Wait up to `timeoutMs` for at least one non-relay browser client to connect.
    * Resolves immediately if one is already present.
    */
-  _waitForBrowserClient(timeoutMs = 5000) {
+  _waitForBrowserClient(timeoutMs = CONFIG.waitForBrowserTimeout) {
     if (this.browserClients.size > 0) return Promise.resolve();
 
     return new Promise((resolve, reject) => {
@@ -261,7 +261,7 @@ export class WebSocketBridge extends EventEmitter {
     // Browser clients — evict zombies via app-level staleness (45s = 2 missed keepalives)
     // WS-level pong keeps lastPing fresh on half-open sockets, but only real
     // extension service workers send keepalive app messages every 20s.
-    const APP_MSG_TIMEOUT = 45_000;
+    const APP_MSG_TIMEOUT = CONFIG.appMsgTimeout;
     for (const [ws, info] of this.browserClients) {
       if (now - (info.lastAppMsg || info.connectedAt) > APP_MSG_TIMEOUT) {
         log.warn('ws_app_stale', { clientId: info.id, staleSec: Math.round((now - (info.lastAppMsg || info.connectedAt)) / 1000) });

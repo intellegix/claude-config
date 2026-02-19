@@ -13,6 +13,7 @@ import { Logger, sanitizeArgs } from './lib/logger.js';
 import { RateLimiter } from './lib/rate-limiter.js';
 import { MetricsCollector } from './lib/metrics.js';
 import { BridgeError } from './lib/error-codes.js';
+import { CONFIG } from './lib/config.js';
 
 // ---------------------------------------------------------------------------
 // Test-specific Logger subclass that captures entries instead of writing stderr
@@ -312,5 +313,31 @@ describe('BridgeError', () => {
     const err = new BridgeError('test', 'CDP_ATTACH_FAILED');
     assert.ok(err instanceof Error, 'BridgeError should be instanceof Error');
     assert.ok(err instanceof BridgeError, 'Should also be instanceof BridgeError');
+  });
+});
+
+// --- CONFIG timeout constants ---
+
+describe('CONFIG timeout constants', () => {
+  it('33. all timeout keys exist and are positive numbers', () => {
+    const expected = [
+      'quick', 'interactive', 'councilExec', 'councilUi',
+      'space', 'heavy', 'fullPage', 'councilApi', 'councilBrowser', 'councilResearch',
+    ];
+    for (const key of expected) {
+      assert.ok(typeof CONFIG.timeouts[key] === 'number', `CONFIG.timeouts.${key} should be a number`);
+      assert.ok(CONFIG.timeouts[key] > 0, `CONFIG.timeouts.${key} should be positive`);
+    }
+  });
+
+  it('34. appMsgTimeout and waitForBrowserTimeout exist and are positive', () => {
+    assert.ok(typeof CONFIG.appMsgTimeout === 'number' && CONFIG.appMsgTimeout > 0,
+      'CONFIG.appMsgTimeout should be a positive number');
+    assert.ok(typeof CONFIG.waitForBrowserTimeout === 'number' && CONFIG.waitForBrowserTimeout > 0,
+      'CONFIG.waitForBrowserTimeout should be a positive number');
+    assert.ok(typeof CONFIG.relayReconnectDelay === 'number' && CONFIG.relayReconnectDelay > 0,
+      'CONFIG.relayReconnectDelay should be a positive number');
+    assert.ok(typeof CONFIG.ppidPollInterval === 'number' && CONFIG.ppidPollInterval > 0,
+      'CONFIG.ppidPollInterval should be a positive number');
   });
 });
