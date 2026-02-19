@@ -90,10 +90,11 @@ class SessionSemaphore:
                 continue
 
             # Check PID liveness
+            # Windows os.kill(pid, 0) can raise SystemError, not just OSError
             pid_alive = True
             try:
                 os.kill(pid, 0)
-            except OSError:
+            except (OSError, SystemError):
                 pid_alive = False
 
             # Remove if PID is dead or TTL expired
