@@ -86,32 +86,48 @@ For the complete dataset: `council_read` with `level: "full"`.
 
 **IMMEDIATELY after receiving the council synthesis, you MUST enter plan mode using the `EnterPlanMode` tool.** Do not ask the user, do not present the synthesis first, do not do anything else — go straight into plan mode.
 
-In plan mode:
-1. Read relevant project files identified in the council findings (use Glob, Grep, Read)
-2. Cross-reference the council's recommended actions against the current codebase state
-3. Identify which recommendations are actionable now vs. need prerequisites
-4. Create a concrete implementation plan with:
-   - Specific files to create/modify
-   - Code changes needed
-   - Dependency ordering (what must happen first)
-   - Risk mitigations from the council findings
-   - **Second-to-last step: Update project memory** — follow these 6 rules:
-     1. MEMORY.md stays under 150 lines — move implementation details to `memory/*.md` topic files
-     2. No duplication between MEMORY.md and CLAUDE.md — if it's a behavioral rule, it belongs in CLAUDE.md only
-     3. New session-learned patterns (bugs, gotchas, workarounds) go in MEMORY.md; implementation details go to topic files
-     4. Delete outdated entries rather than accumulating — check if existing content is superseded
-     5. If adding a new topic file, add a 1-line entry to the Topic File Index in MEMORY.md
-     6. Topic file naming: kebab-case.md
-   - **ALWAYS end with a "Commit & Push" step** — the final step of every plan must commit all changes and push to remote
-5. Write the plan, then call `ExitPlanMode` for user approval
+**CRITICAL: Do NOT ask the user which priorities to tackle. Cover ALL priorities from the research. Never filter, skip, or ask for selection — build the complete plan automatically.**
 
-The plan should directly translate the council's strategic recommendations into executable implementation steps. Don't just summarize the council — turn it into a buildable plan.
+In plan mode, create a **two-tier plan structure** (master plan + sub-plans):
+
+#### Tier 1: Master Plan (the blueprint)
+
+1. Read relevant project files identified in the council findings (use Glob, Grep, Read)
+2. Cross-reference ALL recommended actions against the current codebase
+3. List every priority from the research as a numbered **Phase** in execution order:
+   - Phase ordering: blockers first, then dependencies, then independent work, then polish
+   - Each Phase gets: title, 1-line goal, estimated complexity (S/M/L), prerequisite phases
+   - Group related priorities into the same phase when they touch the same files
+4. The master plan should read like a table of contents with dependency arrows between phases
+
+#### Tier 2: Sub-Plans (the details)
+
+For each Phase in the master plan, write a detailed sub-plan:
+   - Specific files to create/modify (with paths)
+   - Code changes needed (describe the what, not line-by-line diffs)
+   - Acceptance criteria — how to verify this phase is done
+   - Risk mitigations from the council findings
+   - Dependencies on other phases (what must be done first)
+
+#### Required final sections (in every plan):
+
+- **Second-to-last phase: Update project memory** — follow these 6 rules:
+  1. MEMORY.md stays under 150 lines — move implementation details to `memory/*.md` topic files
+  2. No duplication between MEMORY.md and CLAUDE.md — if it's a behavioral rule, it belongs in CLAUDE.md only
+  3. New session-learned patterns (bugs, gotchas, workarounds) go in MEMORY.md; implementation details go to topic files
+  4. Delete outdated entries rather than accumulating — check if existing content is superseded
+  5. If adding a new topic file, add a 1-line entry to the Topic File Index in MEMORY.md
+  6. Topic file naming: kebab-case.md
+- **Final phase: Commit & Push** — commit all changes and push to remote
+
+Write the full plan (master + all sub-plans), then call `ExitPlanMode` for user approval.
 
 ### Step 6: Create task list from plan
 
 After the user approves the plan:
-- Use `TaskCreate` to create tasks for each implementation step
-- Set dependencies with `addBlockedBy` where steps depend on each other
+- Use `TaskCreate` to create one task per Phase from the master plan
+- Set dependencies with `addBlockedBy` matching the phase prerequisites
+- Each task description should contain the full sub-plan for that phase
 - Begin executing the first unblocked task
 
 ## Key Differences from /council-refine

@@ -357,7 +357,7 @@ class WebSocketBridge extends EventEmitter {
 
   _onConnection(ws) {
     const clientId = randomUUID();
-    this.browserClients.set(ws, { id: clientId, lastPing: Date.now(), connectedAt: Date.now() });
+    this.browserClients.set(ws, { id: clientId, lastPing: Date.now(), lastAppMsg: Date.now(), connectedAt: Date.now() });
 
     // Send connection init
     this._send(ws, { type: 'connection_init', clientId, serverVersion: '1.0.0' });
@@ -402,9 +402,12 @@ class WebSocketBridge extends EventEmitter {
   }
 
   async _onMessage(ws, msg) {
-    // Update last activity
+    // Update last activity — app-level messages update both timestamps
     const info = this.browserClients.get(ws) || this.relayClients.get(ws);
-    if (info) info.lastPing = Date.now();
+    if (info) {
+      info.lastPing = Date.now();
+      info.lastAppMsg = Date.now();
+    }
 
     // Handle relay client identification — move from browserClients to relayClients
     if (msg.type === 'relay_init') {
@@ -558,9 +561,16 @@ class WebSocketBridge extends EventEmitter {
 
   _checkHeartbeats() {
     const now = Date.now();
-    // Browser clients — standard heartbeat
+    // Browser clients — evict zombies via app-level staleness (45s = 2 missed keepalives)
+    // WS-level pong keeps lastPing fresh on half-open sockets, but only real
+    // extension service workers send keepalive app messages every 20s.
+    const APP_MSG_TIMEOUT = 45_000;
     for (const [ws, info] of this.browserClients) {
-      if (now - info.lastPing > CONFIG.heartbeatTimeout) {
+      if (now - (info.lastAppMsg || info.connectedAt) > APP_MSG_TIMEOUT) {
+        log.warn('ws_app_stale', { clientId: info.id, staleSec: Math.round((now - (info.lastAppMsg || info.connectedAt)) / 1000) });
+        ws.close(1000, 'App-level heartbeat timeout');
+        this.browserClients.delete(ws);
+      } else if (now - info.lastPing > CONFIG.heartbeatTimeout) {
         log.warn('ws_heartbeat_timeout', { clientId: info.id });
         ws.close(1000, 'Heartbeat timeout');
         this.browserClients.delete(ws);
@@ -1850,7 +1860,7 @@ async function main() {
 // Graceful shutdown
 function handleShutdown(signal) {
   _debugLog(`shutdown signal: ${signal}`);
-  console.error(`\n[BrowserBridge] Received ${signal}, shutting down...`);
+  try { console.error(`\n[BrowserBridge] Received ${signal}, shutting down...`); } catch (_) { /* stderr broken */ }
   serverInstance.shutdown().then(() => process.exit(0)).catch(() => process.exit(1));
 }
 
@@ -1858,11 +1868,20 @@ process.on('SIGINT', () => handleShutdown('SIGINT'));
 process.on('SIGTERM', () => handleShutdown('SIGTERM'));
 process.on('uncaughtException', (err) => {
   _debugLog(`UNCAUGHT: ${err.stack || err.message}`);
-  console.error('[BrowserBridge] Uncaught exception:', err);
+  // EPIPE means parent disconnected — don't write to broken stderr (causes infinite loop)
+  if (err.code === 'EPIPE' || err.code === 'ERR_STREAM_DESTROYED') {
+    _debugLog('EPIPE detected — parent disconnected, exiting cleanly');
+    process.exit(0);
+  }
+  try { console.error('[BrowserBridge] Uncaught exception:', err); } catch (_) { /* stderr broken */ }
 });
 process.on('unhandledRejection', (err) => {
   _debugLog(`UNHANDLED_REJECTION: ${err?.stack || err?.message || err}`);
-  console.error('[BrowserBridge] Unhandled rejection:', err);
+  if (err?.code === 'EPIPE' || err?.code === 'ERR_STREAM_DESTROYED') {
+    _debugLog('EPIPE rejection — parent disconnected, exiting cleanly');
+    process.exit(0);
+  }
+  try { console.error('[BrowserBridge] Unhandled rejection:', err); } catch (_) { /* stderr broken */ }
 });
 
 main().catch((err) => {
