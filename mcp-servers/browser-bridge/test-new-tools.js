@@ -11,6 +11,8 @@ import { describe, it, run } from 'node:test';
 import { Validator } from './lib/validator.js';
 import { Logger, sanitizeArgs } from './lib/logger.js';
 import { RateLimiter } from './lib/rate-limiter.js';
+import { MetricsCollector } from './lib/metrics.js';
+import { BridgeError } from './lib/error-codes.js';
 
 // ---------------------------------------------------------------------------
 // Test-specific Logger subclass that captures entries instead of writing stderr
@@ -231,5 +233,84 @@ describe('BROWSER_BUSY detection', () => {
     } else {
       assert.fail('Should have detected BROWSER_BUSY');
     }
+  });
+});
+
+// --- MetricsCollector ---
+
+describe('MetricsCollector', () => {
+  it('27. records tool calls and returns correct snapshot', () => {
+    const mc = new MetricsCollector();
+    mc.record('browser_navigate', 120, true);
+    mc.record('browser_navigate', 200, true);
+    mc.record('browser_navigate', 80, false, 'TIMEOUT');
+    mc.record('browser_screenshot', 500, true);
+
+    const snap = mc.getSnapshot();
+    assert.strictEqual(snap.window, '1h');
+    assert.strictEqual(snap.totalCalls, 4);
+    assert.strictEqual(snap.totalErrors, 1);
+    assert.strictEqual(snap.perTool.browser_navigate.calls, 3);
+    assert.strictEqual(snap.perTool.browser_navigate.successes, 2);
+    assert.strictEqual(snap.perTool.browser_navigate.failures, 1);
+    assert.ok(snap.perTool.browser_navigate.avgDurationMs > 0);
+    assert.ok(snap.perTool.browser_navigate.p95DurationMs >= 80);
+    assert.deepStrictEqual(snap.perTool.browser_navigate.errorCodes, { TIMEOUT: 1 });
+    assert.strictEqual(snap.perTool.browser_screenshot.calls, 1);
+    assert.strictEqual(snap.perTool.browser_screenshot.successes, 1);
+    mc.destroy();
+  });
+
+  it('28. prunes entries beyond 1-hour window', () => {
+    const mc = new MetricsCollector();
+    // Insert an event with old timestamp
+    mc.events.set('old_tool', [{ ts: Date.now() - 3_700_000, duration: 100, success: true }]);
+    mc.events.set('new_tool', [{ ts: Date.now(), duration: 50, success: true }]);
+
+    mc._prune();
+
+    assert.ok(!mc.events.has('old_tool'), 'Old tool entries should be pruned');
+    assert.ok(mc.events.has('new_tool'), 'Recent tool entries should remain');
+    mc.destroy();
+  });
+
+  it('29. tracks error codes in failure breakdown', () => {
+    const mc = new MetricsCollector();
+    mc.record('browser_execute', 100, false, 'CDP_ATTACH_FAILED');
+    mc.record('browser_execute', 150, false, 'CDP_ATTACH_FAILED');
+    mc.record('browser_execute', 200, false, 'FOCUS_FAILED');
+
+    const snap = mc.getSnapshot();
+    assert.deepStrictEqual(snap.perTool.browser_execute.errorCodes, {
+      CDP_ATTACH_FAILED: 2,
+      FOCUS_FAILED: 1,
+    });
+    mc.destroy();
+  });
+
+  it('30. empty state returns zeroes', () => {
+    const mc = new MetricsCollector();
+    const snap = mc.getSnapshot();
+    assert.strictEqual(snap.totalCalls, 0);
+    assert.strictEqual(snap.totalErrors, 0);
+    assert.deepStrictEqual(snap.perTool, {});
+    mc.destroy();
+  });
+});
+
+// --- BridgeError ---
+
+describe('BridgeError', () => {
+  it('31. carries .code property', () => {
+    const err = new BridgeError('test failure', 'TIMEOUT');
+    assert.strictEqual(err.message, 'test failure');
+    assert.strictEqual(err.code, 'TIMEOUT');
+    assert.strictEqual(err.name, 'BridgeError');
+  });
+
+  it('32. is instanceof Error', () => {
+    const err = new BridgeError('test', 'CDP_ATTACH_FAILED');
+    assert.ok(err instanceof Error, 'BridgeError should be instanceof Error');
+    assert.ok(err instanceof BridgeError, 'Should also be instanceof BridgeError');
   });
 });

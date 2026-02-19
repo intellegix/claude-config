@@ -14,6 +14,7 @@ import { CONFIG } from './lib/config.js';
 import { WebSocketBridge } from './lib/websocket-bridge.js';
 import { RateLimiter } from './lib/rate-limiter.js';
 import { ContextManager } from './lib/context-manager.js';
+import { BridgeError } from './lib/error-codes.js';
 
 // ---------------------------------------------------------------------------
 // Mock WebSocket — minimal mock implementing readyState, send, close, ping
@@ -440,5 +441,112 @@ describe('Relay Session Recovery', () => {
 
     const row = cm.db.prepare('SELECT * FROM relay_sessions WHERE session_id = ?').get('sess-5');
     assert.equal(row, undefined, 'Session should be deleted from DB');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Error Code Propagation Tests (4)
+// ---------------------------------------------------------------------------
+
+describe('Error Code Propagation', () => {
+  let bridge;
+
+  beforeEach(() => {
+    bridge = new WebSocketBridge();
+  });
+
+  afterEach(() => {
+    clearInterval(bridge.heartbeatTimer);
+  });
+
+  it('21. Pending request error with code preserved on reject', async () => {
+    const ws = new MockWebSocket();
+    addBrowserClient(bridge, ws);
+
+    // Set up a pending request
+    const errorPromise = new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(new Error('test timeout')), 5000);
+      bridge.pendingRequests.set('req-err-1', {
+        resolve: () => { clearTimeout(timer); resolve(null); },
+        reject: (err) => { clearTimeout(timer); resolve(err); },
+        timer,
+      });
+    });
+
+    // Simulate error response from extension WITH a code
+    await bridge._onMessage(ws, { requestId: 'req-err-1', error: 'CDP attach failed', code: 'CDP_ATTACH_FAILED' });
+
+    const err = await errorPromise;
+    assert.ok(err instanceof Error, 'Should be an Error');
+    assert.equal(err.message, 'CDP attach failed');
+    assert.equal(err.code, 'CDP_ATTACH_FAILED', 'Error code should be preserved from msg.code');
+  });
+
+  it('22. Broadcast timeout carries TIMEOUT code', async () => {
+    const ws = new MockWebSocket();
+    addBrowserClient(bridge, ws);
+
+    // Broadcast with very short timeout — no response will arrive
+    try {
+      await bridge.broadcast({ type: 'test' }, 50);
+      assert.fail('Should have timed out');
+    } catch (err) {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /timed out/);
+      assert.equal(err.code, 'TIMEOUT', 'Timeout error should carry TIMEOUT code');
+    }
+  });
+
+  it('23. Relay forward error preserves code in response to relay', async () => {
+    const relayWs = new MockWebSocket();
+    const browserWs = new MockWebSocket();
+
+    addRelayClient(bridge, relayWs);
+    addBrowserClient(bridge, browserWs);
+
+    // Simulate relay_forward from relay
+    await bridge._onMessage(relayWs, {
+      type: 'relay_forward',
+      requestId: 'relay-req-1',
+      payload: { type: 'test' },
+      timeout: 5000,
+    });
+
+    // The bridge created a pending request for the browser — find it
+    assert.equal(bridge.pendingRequests.size, 1);
+    const [browserReqId] = bridge.pendingRequests.keys();
+
+    // Simulate error response from browser WITH a code
+    await bridge._onMessage(browserWs, { requestId: browserReqId, error: 'Focus failed', code: 'FOCUS_FAILED' });
+
+    // Check what was sent back to the relay
+    const relayResponse = relayWs.sentMessages.find(m => m.requestId === 'relay-req-1');
+    assert.ok(relayResponse, 'Relay should have received a response');
+    assert.equal(relayResponse.error, 'Focus failed');
+    assert.equal(relayResponse.code, 'FOCUS_FAILED', 'Error code should be forwarded back to relay');
+  });
+
+  it('24. Relay forward timeout includes TIMEOUT code in response', async () => {
+    const relayWs = new MockWebSocket();
+    const browserWs = new MockWebSocket();
+
+    addRelayClient(bridge, relayWs);
+    addBrowserClient(bridge, browserWs);
+
+    // Simulate relay_forward with very short timeout — no browser response will arrive
+    await bridge._onMessage(relayWs, {
+      type: 'relay_forward',
+      requestId: 'relay-req-timeout',
+      payload: { type: 'test' },
+      timeout: 50,
+    });
+
+    // Wait for the timeout to fire
+    await new Promise(r => setTimeout(r, 100));
+
+    const relayResponse = relayWs.sentMessages.find(m => m.requestId === 'relay-req-timeout');
+    assert.ok(relayResponse, 'Relay should have received a timeout response');
+    assert.match(relayResponse.error, /timed out/);
+    assert.equal(relayResponse.code, 'TIMEOUT', 'Timeout response should include TIMEOUT code');
   });
 });
