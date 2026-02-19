@@ -24,6 +24,7 @@ import tempfile
 
 from council_config import (
     BROWSER_HEADLESS,
+    BROWSER_LABS_TIMEOUT,
     BROWSER_LOCALSTORAGE_PATH,
     BROWSER_POLL_INTERVAL,
     BROWSER_SESSION_PATH,
@@ -245,9 +246,10 @@ def _load_selectors() -> dict:
 class PerplexityCouncil:
     """Autonomous Playwright-based Perplexity automation.
 
-    Supports two Perplexity modes:
+    Supports three Perplexity modes:
       - "council": /council slash command (multi-model, 3 AI responses + synthesis)
       - "research": /research slash command (deep research, single synthesized response)
+      - "labs": /labs slash command (experimental labs mode, longer timeout)
     """
 
     def __init__(
@@ -261,9 +263,11 @@ class PerplexityCouncil:
     ):
         self.headless = headless
         self.session_path = session_path or BROWSER_SESSION_PATH
-        # Research mode gets longer timeout — deep research routinely takes 2-4 min
+        # Research/labs modes get longer timeouts
         if timeout == BROWSER_TIMEOUT and perplexity_mode == "research":
             self.timeout = BROWSER_RESEARCH_TIMEOUT
+        elif timeout == BROWSER_TIMEOUT and perplexity_mode == "labs":
+            self.timeout = BROWSER_LABS_TIMEOUT
         else:
             self.timeout = timeout
         self.save_artifacts = save_artifacts
@@ -566,6 +570,8 @@ class PerplexityCouncil:
             return await self._verify_council_activation(page)
         elif self.perplexity_mode == "research":
             return await self._verify_research_activation(page)
+        elif self.perplexity_mode == "labs":
+            return await self._verify_labs_activation(page)
         else:
             _log(f"Unknown mode '{self.perplexity_mode}', proceeding optimistically")
             return True
@@ -608,6 +614,25 @@ class PerplexityCouncil:
         except Exception:
             pass
         _log("WARNING: Could not verify research activation, proceeding anyway")
+        return True  # Proceed optimistically
+
+    async def _verify_labs_activation(self, page) -> bool:
+        """Verify labs mode activated (look for labs indicators)."""
+        try:
+            found = await page.evaluate("""() => {
+                const buttons = document.querySelectorAll('button, [role="button"], div[data-state]');
+                for (const b of buttons) {
+                    const text = (b.textContent || '').trim().toLowerCase();
+                    if (text.includes('labs')) return true;
+                }
+                return false;
+            }""")
+            if found:
+                _log("Labs mode activated (found labs indicator)")
+                return True
+        except Exception:
+            pass
+        _log("WARNING: Could not verify labs activation, proceeding anyway")
         return True  # Proceed optimistically
 
     async def activate_council(self, page) -> bool:
@@ -1034,7 +1059,7 @@ class PerplexityCouncil:
         }
 
         # Extract synthesis/report text — different selectors per mode
-        if self.perplexity_mode == "research":
+        if self.perplexity_mode in ("research", "labs"):
             # Research mode: full report is in the right panel (prose.max-w-none)
             try:
                 text = await page.evaluate("""() => {
@@ -1070,7 +1095,7 @@ class PerplexityCouncil:
 
         # Find model cards (council mode only — research mode has no model cards)
         cards = []
-        if self.perplexity_mode != "research":
+        if self.perplexity_mode not in ("research", "labs"):
             cards = await self._find_model_cards(page)
             _log(f"Found {len(cards)} model cards")
 
@@ -1326,8 +1351,8 @@ async def main() -> None:
     parser.add_argument("--session-path", type=str, help="Path to session file")
     parser.add_argument("--save-artifacts", action="store_true", default=False,
         help="Save screenshots/HTML on failure (default: True when --opus-synthesis)")
-    parser.add_argument("--perplexity-mode", choices=["council", "research"], default="council",
-        help="Perplexity slash command: /council (multi-model) or /research (deep research)")
+    parser.add_argument("--perplexity-mode", choices=["council", "research", "labs"], default="council",
+        help="Perplexity slash command: /council (multi-model), /research (deep research), or /labs (experimental labs)")
 
     args = parser.parse_args()
 

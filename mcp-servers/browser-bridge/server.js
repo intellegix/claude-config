@@ -432,6 +432,20 @@ class BrowserBridgeServer {
           },
         },
         {
+          name: 'labs_query',
+          description: "Run a query on Perplexity using /labs mode via Playwright browser automation. Similar to research_query but uses Perplexity's experimental labs mode with a longer 15-minute timeout. Cost: $0 (uses Perplexity login session).",
+          inputSchema: {
+            type: 'object',
+            properties: {
+              query: { type: 'string', description: 'The research question or analysis request' },
+              includeContext: { type: 'boolean', description: 'Include project context (git log, CLAUDE.md, MEMORY.md). Default: true.' },
+              headful: { type: 'boolean', description: 'Run browser in visible mode. Default: false.' },
+              opusSynthesis: { type: 'boolean', description: 'Run Opus 4.6 re-synthesis on results (requires ANTHROPIC_API_KEY). Default: false.' },
+            },
+            required: ['query'],
+          },
+        },
+        {
           name: 'council_metrics',
           description: 'Get operational metrics from the council pipeline run log. Shows degradation ratio, avg cost, per-mode breakdown, error rate. Read-only — no network calls. Use to check pipeline health.',
           inputSchema: {
@@ -827,13 +841,15 @@ class BrowserBridgeServer {
         );
       }
 
+      case 'labs_query':
       case 'research_query':
       case 'council_query': {
         const query = Validator.text(args.query, 10_000);
         const isResearch = name === 'research_query';
+        const isLabs = name === 'labs_query';
         const validModes = ['api', 'direct', 'browser', 'auto'];
-        // Default to browser mode (no API keys needed). research_query always uses browser.
-        const mode = isResearch ? 'browser' : (validModes.includes(args.mode) ? args.mode : 'browser');
+        // Default to browser mode (no API keys needed). research_query/labs_query always use browser.
+        const mode = (isResearch || isLabs) ? 'browser' : (validModes.includes(args.mode) ? args.mode : 'browser');
         const includeContext = Validator.boolean(args.includeContext, true);
         const scriptDir = join(homedir(), '.claude', 'council-automation');
         const cacheDir = join(homedir(), '.claude', 'council-cache');
@@ -865,10 +881,11 @@ class BrowserBridgeServer {
         if (headful) scriptArgs.push('--headful');
         if (opusSynthesis) scriptArgs.push('--opus-synthesis');
         if (isResearch) scriptArgs.push('--perplexity-mode', 'research');
+        if (isLabs) scriptArgs.push('--perplexity-mode', 'labs');
         scriptArgs.push(query);
 
-        // Browser/auto modes need longer timeout; research mode needs even more (deep research takes 2-4 min)
-        const timeout = isResearch ? CONFIG.timeouts.councilResearch : (mode === 'browser' || mode === 'auto') ? CONFIG.timeouts.councilBrowser : CONFIG.timeouts.councilApi;
+        // Browser/auto modes need longer timeout; research/labs modes need even more
+        const timeout = isLabs ? CONFIG.timeouts.councilLabs : isResearch ? CONFIG.timeouts.councilResearch : (mode === 'browser' || mode === 'auto') ? CONFIG.timeouts.councilBrowser : CONFIG.timeouts.councilApi;
         const result = execFileSync('python', scriptArgs, {
           timeout,
           encoding: 'utf-8',

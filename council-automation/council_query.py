@@ -631,7 +631,7 @@ async def run_browser_query(
     """Execute query via Playwright browser automation against Perplexity UI.
 
     Args:
-        perplexity_mode: "council" for multi-model council, "research" for deep research.
+        perplexity_mode: "council" for multi-model council, "research" for deep research, "labs" for experimental labs.
     """
     try:
         from council_browser import PerplexityCouncil
@@ -936,8 +936,8 @@ def main() -> None:
     parser.add_argument("--read-model", help="Read specific model's response from cache")
     parser.add_argument("--headful", action="store_true", help="Run browser in visible mode")
     parser.add_argument("--opus-synthesis", action="store_true", help="Run Opus re-synthesis on browser results")
-    parser.add_argument("--perplexity-mode", choices=["council", "research"], default="council",
-        help="Perplexity slash command to use: /council (multi-model) or /research (deep research)")
+    parser.add_argument("--perplexity-mode", choices=["council", "research", "labs"], default="council",
+        help="Perplexity slash command to use: /council (multi-model), /research (deep research), or /labs (experimental labs)")
     parser.add_argument("--auto-context", action="store_true",
         help="Auto-generate project context from git/CLAUDE.md/MEMORY.md")
 
