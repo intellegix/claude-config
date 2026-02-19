@@ -6,7 +6,7 @@
  * Bidirectional bridge between Claude Code CLI and Chrome extension via WebSocket.
  * Replaces native messaging with a clean localhost WebSocket approach.
  *
- * Components:
+ * Components (in lib/):
  *   - ContextManager: SQLite-backed conversation/context persistence
  *   - WebSocketBridge: ws server on 127.0.0.1:8765 for Chrome extension connections
  *   - BrowserBridgeServer: MCP protocol handler with tool/resource definitions
@@ -21,622 +21,24 @@ import {
   ListResourcesRequestSchema,
   ReadResourceRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { WebSocketServer, WebSocket } from 'ws';
-import Database from 'better-sqlite3';
-import { createServer as createHttpServer } from 'node:http';
-import { randomUUID } from 'node:crypto';
-import { EventEmitter } from 'node:events';
-import { writeFileSync, readFileSync, mkdirSync, existsSync } from 'node:fs';
+import { WebSocket } from 'ws';
+import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { basename, dirname, join, resolve as pathResolve } from 'node:path';
 import { homedir } from 'node:os';
-import { execFileSync, spawn } from 'node:child_process';
-import { appendFileSync, existsSync as fsExistsSync, statSync, unlinkSync, renameSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 
-// ---------------------------------------------------------------------------
-// Debug logging — writes to ~/.claude/mcp-debug.log for crash diagnostics
-// ---------------------------------------------------------------------------
+import { CONFIG, _debugLog } from './lib/config.js';
+import { Validator } from './lib/validator.js';
+import { log, sanitizeArgs } from './lib/logger.js';
+import { RateLimiter } from './lib/rate-limiter.js';
+import { ContextManager } from './lib/context-manager.js';
+import { WebSocketBridge } from './lib/websocket-bridge.js';
+import { startHealthServer } from './lib/health-server.js';
 
-const _debugLogPath = join(homedir(), '.claude', 'mcp-debug.log');
-
-// Rotate log if > 5MB (runs once per startup)
-const _MAX_LOG_SIZE = 5 * 1024 * 1024;
-try {
-  if (fsExistsSync(_debugLogPath) && statSync(_debugLogPath).size > _MAX_LOG_SIZE) {
-    const oldPath = _debugLogPath + '.old';
-    if (fsExistsSync(oldPath)) unlinkSync(oldPath);
-    renameSync(_debugLogPath, oldPath);
-  }
-} catch (_) { /* ignore rotation errors */ }
-
-function _debugLog(msg) {
-  try {
-    appendFileSync(_debugLogPath, `${new Date().toISOString()} [PID:${process.pid}] ${msg}\n`);
-  } catch (_) { /* ignore */ }
-}
 _debugLog(`imports OK — cwd=${process.cwd()} argv=${process.argv.join(' ')} ppid=${process.ppid}`);
 
-// ---------------------------------------------------------------------------
-// Configuration
-// ---------------------------------------------------------------------------
-
-const CONFIG = {
-  wsPort: parseInt(process.env.MCP_WS_PORT || '8765', 10),
-  wsHost: '127.0.0.1',
-  healthPort: parseInt(process.env.MCP_HEALTH_PORT || '8766', 10),
-  requestTimeout: 15_000,
-  heartbeatTimeout: 120_000,
-  heartbeatCheck: 45_000,
-  maxMessageSize: 50_000_000, // 50 MB — screenshots can be large
-  dbPath: process.env.MCP_DB_PATH || ':memory:',
-  cleanupInterval: 300_000, // 5 min
-  relayIdleTtl: 900_000, // 15 minutes — evict idle relay clients
-};
-
-// ---------------------------------------------------------------------------
-// Validator — input validation helpers
-// ---------------------------------------------------------------------------
-
-const Validator = {
-  selector(val) {
-    if (typeof val !== 'string' || val.trim().length === 0) throw new Error('Selector must be a non-empty string');
-    if (val.length > 500) throw new Error('Selector too long (max 500 chars)');
-    return val.trim();
-  },
-  url(val) {
-    if (typeof val !== 'string' || val.trim().length === 0) throw new Error('URL must be a non-empty string');
-    if (val.length > 2048) throw new Error('URL too long (max 2048 chars)');
-    return val.trim();
-  },
-  text(val, maxLen = 100_000) {
-    if (typeof val !== 'string') throw new Error('Text must be a string');
-    if (val.length > maxLen) throw new Error(`Text too long (max ${maxLen} chars)`);
-    return val;
-  },
-  expression(val) {
-    if (typeof val !== 'string' || val.trim().length === 0) throw new Error('Expression must be a non-empty string');
-    if (val.length > 100_000) throw new Error('Expression too long (max 100000 chars)');
-    return val;
-  },
-  timeout(val, min = 100, max = 300_000, def = 15_000) {
-    if (val === undefined || val === null) return def;
-    const n = Number(val);
-    if (isNaN(n) || n < min || n > max) throw new Error(`Timeout must be ${min}-${max}ms`);
-    return n;
-  },
-  boolean(val, def = false) {
-    if (val === undefined || val === null) return def;
-    return !!val;
-  },
-  tabId(val) {
-    if (val === undefined || val === null) return undefined;
-    const n = Number(val);
-    if (isNaN(n) || n <= 0) throw new Error('Invalid tabId');
-    return n;
-  },
-  action(val, allowed) {
-    if (typeof val !== 'string') throw new Error('Action must be a string');
-    if (!allowed.includes(val)) throw new Error(`Invalid action: ${val}. Must be one of: ${allowed.join(', ')}`);
-    return val;
-  },
-  object(val, name = 'value') {
-    if (!val || typeof val !== 'object' || Array.isArray(val)) throw new Error(`${name} must be a non-empty object`);
-    return val;
-  },
-  array(val, name = 'value') {
-    if (!Array.isArray(val) || val.length === 0) throw new Error(`${name} must be a non-empty array`);
-    return val;
-  },
-  key(val) {
-    if (typeof val !== 'string' || val.length === 0) throw new Error('Key must be a non-empty string');
-    if (val.length > 50) throw new Error('Key too long (max 50 chars)');
-    return val;
-  },
-};
-
-// ---------------------------------------------------------------------------
-// Logger — structured JSON logging to stderr
-// ---------------------------------------------------------------------------
-
-class Logger {
-  constructor(level = 'info') {
-    this.levels = { debug: 0, info: 1, warn: 2, error: 3 };
-    this.level = this.levels[level] ?? 1;
-  }
-  _log(level, msg, meta = {}) {
-    if (this.levels[level] < this.level) return;
-    const entry = {
-      ts: new Date().toISOString(),
-      level,
-      msg,
-      ...meta,
-    };
-    process.stderr.write(JSON.stringify(entry) + '\n');
-  }
-  debug(msg, meta) { this._log('debug', msg, meta); }
-  info(msg, meta) { this._log('info', msg, meta); }
-  warn(msg, meta) { this._log('warn', msg, meta); }
-  error(msg, meta) { this._log('error', msg, meta); }
-}
-
-const log = new Logger(process.env.MCP_LOG_LEVEL || 'info');
-
-/** Strip long text values from args for safe logging */
-function sanitizeArgs(args) {
-  if (!args || typeof args !== 'object') return args;
-  const out = {};
-  for (const [k, v] of Object.entries(args)) {
-    if (typeof v === 'string' && v.length > 200) {
-      out[k] = `[text: ${v.length} chars]`;
-    } else if (typeof v === 'object' && v !== null) {
-      out[k] = '[object]';
-    } else {
-      out[k] = v;
-    }
-  }
-  return out;
-}
-
-// ---------------------------------------------------------------------------
-// RateLimiter — token bucket algorithm
-// ---------------------------------------------------------------------------
-
-class RateLimiter {
-  constructor(maxTokens = 60, refillRate = 1) {
-    this.buckets = new Map();
-    this.maxTokens = maxTokens;
-    this.refillRate = refillRate; // tokens per second
-  }
-  check(clientId) {
-    const now = Date.now();
-    let bucket = this.buckets.get(clientId);
-    if (!bucket) {
-      bucket = { tokens: this.maxTokens, lastRefill: now };
-      this.buckets.set(clientId, bucket);
-    }
-    const elapsed = (now - bucket.lastRefill) / 1000;
-    bucket.tokens = Math.min(this.maxTokens, bucket.tokens + elapsed * this.refillRate);
-    bucket.lastRefill = now;
-    if (bucket.tokens < 1) return false;
-    bucket.tokens--;
-    return true;
-  }
-}
-
 const rateLimiter = new RateLimiter(60, 1);
-
-// ---------------------------------------------------------------------------
-// ContextManager — SQLite persistence layer
-// ---------------------------------------------------------------------------
-
-class ContextManager {
-  constructor(dbPath = CONFIG.dbPath) {
-    this.db = new Database(dbPath);
-    this.db.pragma('journal_mode = WAL');
-    this.db.pragma('synchronous = NORMAL');
-    this.db.pragma('cache_size = 1000');
-    this._initSchema();
-    this.cleanupTimer = setInterval(() => this.cleanup(), CONFIG.cleanupInterval);
-  }
-
-  _initSchema() {
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS conversations (
-        id TEXT PRIMARY KEY,
-        title TEXT,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS messages (
-        id TEXT PRIMARY KEY,
-        conversation_id TEXT NOT NULL,
-        role TEXT NOT NULL,
-        content TEXT NOT NULL,
-        timestamp INTEGER NOT NULL,
-        FOREIGN KEY (conversation_id) REFERENCES conversations(id)
-      );
-
-      CREATE TABLE IF NOT EXISTS context_snapshots (
-        id TEXT PRIMARY KEY,
-        url TEXT,
-        title TEXT,
-        content TEXT,
-        tab_id INTEGER,
-        timestamp INTEGER NOT NULL
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_messages_conv
-        ON messages(conversation_id);
-      CREATE INDEX IF NOT EXISTS idx_snapshots_ts
-        ON context_snapshots(timestamp);
-    `);
-  }
-
-  // --- Conversation CRUD ---
-
-  createConversation(title = 'Untitled') {
-    const id = randomUUID();
-    const now = Date.now();
-    this.db
-      .prepare('INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)')
-      .run(id, title, now, now);
-    return id;
-  }
-
-  addMessage(conversationId, role, content) {
-    const id = randomUUID();
-    this.db
-      .prepare('INSERT INTO messages (id, conversation_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)')
-      .run(id, conversationId, role, content, Date.now());
-    return id;
-  }
-
-  getConversation(conversationId) {
-    const conv = this.db
-      .prepare('SELECT * FROM conversations WHERE id = ?')
-      .get(conversationId);
-    if (!conv) return null;
-    const messages = this.db
-      .prepare('SELECT * FROM messages WHERE conversation_id = ? ORDER BY timestamp')
-      .all(conversationId);
-    return { ...conv, messages };
-  }
-
-  // --- Context snapshots ---
-
-  saveSnapshot(data) {
-    const id = randomUUID();
-    this.db
-      .prepare('INSERT INTO context_snapshots (id, url, title, content, tab_id, timestamp) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(id, data.url || '', data.title || '', JSON.stringify(data), data.tabId || null, Date.now());
-    return id;
-  }
-
-  getLatestSnapshot() {
-    return this.db
-      .prepare('SELECT * FROM context_snapshots ORDER BY timestamp DESC LIMIT 1')
-      .get() || null;
-  }
-
-  // --- Cleanup ---
-
-  cleanup() {
-    const cutoff = Date.now() - 86_400_000; // 24 hours
-    this.db.prepare('DELETE FROM context_snapshots WHERE timestamp < ?').run(cutoff);
-    this.db.prepare('DELETE FROM messages WHERE timestamp < ?').run(cutoff);
-    this.db.prepare('DELETE FROM conversations WHERE updated_at < ?').run(cutoff);
-  }
-
-  destroy() {
-    clearInterval(this.cleanupTimer);
-    try { this.db.close(); } catch { /* already closed */ }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// WebSocketBridge — manages Chrome extension connections
-// ---------------------------------------------------------------------------
-
-class WebSocketBridge extends EventEmitter {
-  constructor() {
-    super();
-    this.wss = null;
-    this.browserClients = new Map();     // ws -> { id, lastPing, connectedAt }
-    this.relayClients = new Map();       // ws -> { id, lastPing, connectedAt, role, sessionId, lastActivity, pid }
-    this.pendingRequests = new Map();     // requestId -> { resolve, reject, timer }
-    this.heartbeatTimer = null;
-    this.cachedPageContext = null;
-  }
-
-  start() {
-    return new Promise((resolve, reject) => {
-      this.wss = new WebSocketServer({
-        host: CONFIG.wsHost,
-        port: CONFIG.wsPort,
-        maxPayload: CONFIG.maxMessageSize,
-      });
-
-      this.wss.once('listening', () => {
-        console.error(`[WebSocketBridge] Listening on ws://${CONFIG.wsHost}:${CONFIG.wsPort}`);
-        // Re-attach persistent error handler after successful bind
-        this.wss.on('error', (err) => {
-          console.error('[WebSocketBridge] Server error:', err.message);
-        });
-        resolve();
-      });
-
-      this.wss.once('error', (err) => {
-        console.error('[WebSocketBridge] Server error:', err.message);
-        reject(err);
-      });
-
-      this.wss.on('connection', (ws) => this._onConnection(ws));
-      this.heartbeatTimer = setInterval(() => this._checkHeartbeats(), CONFIG.heartbeatCheck);
-    });
-  }
-
-  _onConnection(ws) {
-    const clientId = randomUUID();
-    this.browserClients.set(ws, { id: clientId, lastPing: Date.now(), lastAppMsg: Date.now(), connectedAt: Date.now() });
-
-    // Send connection init
-    this._send(ws, { type: 'connection_init', clientId, serverVersion: '1.0.0' });
-
-    ws.on('message', (raw) => {
-      try {
-        const msg = JSON.parse(raw.toString());
-        this._onMessage(ws, msg);
-      } catch {
-        console.error('[WebSocketBridge] Bad JSON from client');
-      }
-    });
-
-    ws.on('pong', () => {
-      const info = this.browserClients.get(ws) || this.relayClients.get(ws);
-      if (info) info.lastPing = Date.now();
-    });
-
-    ws.on('close', () => {
-      const closingInfo = this.browserClients.get(ws) || this.relayClients.get(ws);
-      this.browserClients.delete(ws);
-      this.relayClients.delete(ws);
-      this.emit('clientDisconnected', clientId);
-      log.info('ws_close', { clientId, browsers: this.browserClients.size, relays: this.relayClients.size });
-
-      // When a relay disconnects, tell browser clients to close its session tabs
-      if (closingInfo && closingInfo.role === 'stdio-relay' && closingInfo.sessionId) {
-        const cleanup = { type: 'session_cleanup', payload: { sessionId: closingInfo.sessionId } };
-        for (const [clientWs] of this.browserClients) {
-          this._send(clientWs, cleanup);
-        }
-        console.error(`[WebSocketBridge] Sent session_cleanup for relay session ${closingInfo.sessionId.slice(0, 8)}`);
-      }
-    });
-
-    ws.on('error', (err) => {
-      console.error(`[WebSocketBridge] Client ${clientId} error:`, err.message);
-    });
-
-    this.emit('clientConnected', clientId);
-    log.info('ws_connect', { clientId, browsers: this.browserClients.size, relays: this.relayClients.size });
-  }
-
-  async _onMessage(ws, msg) {
-    // Update last activity — app-level messages update both timestamps
-    const info = this.browserClients.get(ws) || this.relayClients.get(ws);
-    if (info) {
-      info.lastPing = Date.now();
-      info.lastAppMsg = Date.now();
-    }
-
-    // Handle relay client identification — move from browserClients to relayClients
-    if (msg.type === 'relay_init') {
-      const browserInfo = this.browserClients.get(ws);
-      if (browserInfo) {
-        this.browserClients.delete(ws);
-        browserInfo.role = 'stdio-relay';
-        browserInfo.sessionId = msg.payload?.sessionId;
-        browserInfo.lastActivity = Date.now();
-        browserInfo.pid = msg.payload?.pid;
-        this.relayClients.set(ws, browserInfo);
-      }
-      log.info('relay_connect', { clientId: browserInfo?.id, pid: msg.payload?.pid, sessionId: msg.payload?.sessionId?.slice(0, 8), totalRelays: this.relayClients.size });
-      return;
-    }
-
-    // Handle relay-forwarded tool calls — route to browser clients via broadcast
-    if (msg.type === 'relay_forward') {
-      // Track relay activity for idle TTL
-      const relayInfo = this.relayClients.get(ws);
-      if (relayInfo) relayInfo.lastActivity = Date.now();
-
-      const relayRequestId = msg.requestId;
-      const timeout = msg.timeout || CONFIG.requestTimeout;
-
-      // Wait for a browser client if none connected (e.g. extension reconnecting)
-      if (this.browserClients.size === 0) {
-        try {
-          await this._waitForBrowserClient();
-        } catch {
-          this._send(ws, { requestId: relayRequestId, error: 'No browser extension connected' });
-          return;
-        }
-      }
-
-      // Use a fresh requestId for the browser broadcast to avoid collision
-      const browserRequestId = randomUUID();
-      const envelope = { ...msg.payload, requestId: browserRequestId };
-
-      const timer = setTimeout(() => {
-        this.pendingRequests.delete(browserRequestId);
-        this._send(ws, { requestId: relayRequestId, error: `Request timed out after ${timeout}ms` });
-      }, timeout);
-
-      this.pendingRequests.set(browserRequestId, {
-        resolve: (result) => {
-          this._send(ws, { requestId: relayRequestId, result });
-        },
-        reject: (err) => {
-          this._send(ws, { requestId: relayRequestId, error: err.message });
-        },
-        timer,
-      });
-
-      for (const [clientWs] of this.browserClients) {
-        this._send(clientWs, envelope);
-      }
-      return;
-    }
-
-    // Handle response to a pending request
-    if (msg.requestId && this.pendingRequests.has(msg.requestId)) {
-      const pending = this.pendingRequests.get(msg.requestId);
-      this.pendingRequests.delete(msg.requestId);
-      clearTimeout(pending.timer);
-      if (msg.error) {
-        pending.reject(new Error(msg.error));
-      } else {
-        pending.resolve(msg.result || msg);
-      }
-      return;
-    }
-
-    // Handle browser-initiated events
-    if (msg.type === 'page_context_update') {
-      this.cachedPageContext = msg.payload;
-      this.emit('pageContextUpdate', msg.payload);
-      return;
-    }
-
-    if (msg.type === 'pong' || msg.type === 'keepalive') {
-      return; // heartbeat responses
-    }
-
-    // Forward unhandled events
-    this.emit('message', msg);
-  }
-
-  /**
-   * Wait up to `timeoutMs` for at least one non-relay browser client to connect.
-   * Resolves immediately if one is already present.
-   */
-  _waitForBrowserClient(timeoutMs = 5000) {
-    if (this.browserClients.size > 0) return Promise.resolve();
-
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.removeListener('clientConnected', onClient);
-        reject(new Error('No browser extension connected'));
-      }, timeoutMs);
-
-      const onClient = () => {
-        if (this.browserClients.size > 0) {
-          clearTimeout(timer);
-          this.removeListener('clientConnected', onClient);
-          resolve();
-        }
-      };
-      this.on('clientConnected', onClient);
-    });
-  }
-
-  /**
-   * Send a request to all connected browser extensions and await the first response.
-   */
-  async broadcast(message, timeout = CONFIG.requestTimeout) {
-    await this._waitForBrowserClient();
-
-    const requestId = randomUUID();
-    const envelope = { ...message, requestId };
-    log.debug('broadcast', { requestId, type: message.type });
-
-    return new Promise((resolve, reject) => {
-      const broadcastStart = Date.now();
-      const timer = setTimeout(() => {
-        this.pendingRequests.delete(requestId);
-        log.warn('broadcast_timeout', { requestId, type: message.type, timeout });
-        reject(new Error(`Request timed out after ${timeout}ms`));
-      }, timeout);
-
-      this.pendingRequests.set(requestId, {
-        resolve: (result) => {
-          log.debug('broadcast_response', { requestId, duration: Date.now() - broadcastStart });
-          resolve(result);
-        },
-        reject,
-        timer,
-      });
-
-      for (const [ws] of this.browserClients) {
-        this._send(ws, envelope);
-      }
-    });
-  }
-
-  _send(ws, data) {
-    if (ws.readyState === 1 /* OPEN */) {
-      ws.send(JSON.stringify(data));
-    }
-  }
-
-  _checkHeartbeats() {
-    const now = Date.now();
-    // Browser clients — evict zombies via app-level staleness (45s = 2 missed keepalives)
-    // WS-level pong keeps lastPing fresh on half-open sockets, but only real
-    // extension service workers send keepalive app messages every 20s.
-    const APP_MSG_TIMEOUT = 45_000;
-    for (const [ws, info] of this.browserClients) {
-      if (now - (info.lastAppMsg || info.connectedAt) > APP_MSG_TIMEOUT) {
-        log.warn('ws_app_stale', { clientId: info.id, staleSec: Math.round((now - (info.lastAppMsg || info.connectedAt)) / 1000) });
-        ws.close(1000, 'App-level heartbeat timeout');
-        this.browserClients.delete(ws);
-      } else if (now - info.lastPing > CONFIG.heartbeatTimeout) {
-        log.warn('ws_heartbeat_timeout', { clientId: info.id });
-        ws.close(1000, 'Heartbeat timeout');
-        this.browserClients.delete(ws);
-      } else {
-        ws.ping();
-      }
-    }
-    // Relay clients — heartbeat + idle TTL eviction
-    for (const [ws, info] of this.relayClients) {
-      if (now - info.lastPing > CONFIG.heartbeatTimeout) {
-        log.warn('ws_heartbeat_timeout', { clientId: info.id, type: 'relay' });
-        ws.close(1000, 'Heartbeat timeout');
-        this.relayClients.delete(ws);
-      } else if (now - (info.lastActivity || info.connectedAt) > CONFIG.relayIdleTtl) {
-        log.warn('relay_idle_evict', { clientId: info.id, sessionId: info.sessionId?.slice(0, 8), idleMin: Math.round((now - (info.lastActivity || info.connectedAt)) / 60000) });
-        ws.close(1000, 'Relay idle timeout');
-        this.relayClients.delete(ws);
-      } else {
-        ws.ping();
-      }
-    }
-  }
-
-  getStatus() {
-    const now = Date.now();
-    return {
-      connected: this.browserClients.size > 0,
-      clientCount: this.browserClients.size + this.relayClients.size,
-      browserCount: this.browserClients.size,
-      relayCount: this.relayClients.size,
-      browsers: [...this.browserClients.values()].map(c => ({
-        id: c.id,
-        connectedAt: c.connectedAt,
-        lastPing: c.lastPing,
-      })),
-      relays: [...this.relayClients.values()].map(c => ({
-        id: c.id,
-        connectedAt: c.connectedAt,
-        lastPing: c.lastPing,
-        sessionId: c.sessionId?.slice(0, 8),
-        pid: c.pid,
-        idleSeconds: Math.round((now - (c.lastActivity || c.connectedAt)) / 1000),
-      })),
-      cachedPageContext: this.cachedPageContext
-        ? { url: this.cachedPageContext.url, title: this.cachedPageContext.title }
-        : null,
-    };
-  }
-
-  stop() {
-    clearInterval(this.heartbeatTimer);
-    for (const [ws] of this.browserClients) ws.close(1000, 'Server shutting down');
-    for (const [ws] of this.relayClients) ws.close(1000, 'Server shutting down');
-    for (const [, pending] of this.pendingRequests) {
-      clearTimeout(pending.timer);
-      pending.reject(new Error('Server shutting down'));
-    }
-    this.pendingRequests.clear();
-    this.browserClients.clear();
-    this.relayClients.clear();
-    if (this.wss) {
-      this.wss.close();
-      this.wss = null;
-    }
-  }
-}
 
 // ---------------------------------------------------------------------------
 // BrowserBridgeServer — MCP protocol handler
@@ -1576,46 +978,27 @@ class BrowserBridgeServer {
     this.bridge.on('clientDisconnected', (clientId) => {
       console.error(`[BrowserBridge] Extension disconnected: ${clientId}`);
     });
-  }
 
-  // -----------------------------------------------------------------------
-  // Health check HTTP server
-  // -----------------------------------------------------------------------
+    // Relay lifecycle — persist session state for auto-recovery
+    this.bridge.on('relayConnected', ({ sessionId, pid, projectPath, projectLabel }) => {
+      if (!sessionId || !projectPath) return;
+      try {
+        this.contextManager.saveRelaySession(sessionId, projectLabel || '', projectPath, pid);
+        _debugLog(`relay session saved: ${sessionId.slice(0, 8)} path=${projectPath}`);
+      } catch (err) {
+        console.error('[BrowserBridge] Failed to save relay session:', err.message);
+      }
+    });
 
-  _startHealthServer() {
-    return new Promise((resolve, reject) => {
-      this.healthServer = createHttpServer((req, res) => {
-        if (req.url === '/' || req.url === '/health') {
-          const status = this.bridge.getStatus();
-          const body = JSON.stringify({
-            status: 'ok',
-            server: 'claude-browser-bridge',
-            version: '1.1.0',
-            uptime: process.uptime(),
-            bridge: status,
-            rateLimit: { maxPerMinute: rateLimiter.maxTokens, activeSessions: rateLimiter.buckets.size },
-          });
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(body);
-        } else {
-          res.writeHead(404);
-          res.end('Not Found');
-        }
-      });
-
-      this.healthServer.once('error', (err) => {
-        console.error('[HealthCheck] Server error:', err.message);
-        reject(err);
-      });
-
-      this.healthServer.listen(CONFIG.healthPort, CONFIG.wsHost, () => {
-        console.error(`[HealthCheck] Listening on http://${CONFIG.wsHost}:${CONFIG.healthPort}/health`);
-        // Re-attach persistent error handler after successful bind
-        this.healthServer.on('error', (err) => {
-          console.error('[HealthCheck] Server error:', err.message);
-        });
-        resolve();
-      });
+    this.bridge.on('relayDisconnected', ({ sessionId }) => {
+      if (!sessionId) return;
+      try {
+        this.contextManager.markRelayOrphaned(sessionId);
+        _debugLog(`relay session orphaned: ${sessionId.slice(0, 8)}`);
+        console.error(`[BrowserBridge] Relay session ${sessionId.slice(0, 8)} marked orphaned for recovery`);
+      } catch (err) {
+        console.error('[BrowserBridge] Failed to mark relay orphaned:', err.message);
+      }
     });
   }
 
@@ -1642,10 +1025,24 @@ class BrowserBridgeServer {
           _debugLog('_connectAsRelay() WS open — sending relay_init');
           console.error('[BrowserBridge] Relay connected to primary WS server');
 
-          // Identify as relay, not browser extension — include sessionId for cleanup on disconnect
+          // Check for orphaned session to recover (same project directory)
+          try {
+            const orphaned = this.contextManager.findOrphanedSession(process.cwd());
+            if (orphaned) {
+              this.sessionId = orphaned.session_id;
+              this.contextManager.recoverRelaySession(orphaned.session_id, process.pid);
+              _debugLog(`recovered orphaned session: ${orphaned.session_id.slice(0, 8)}`);
+              console.error(`[BrowserBridge] Recovered orphaned session ${orphaned.session_id.slice(0, 8)} — tab group preserved`);
+            }
+          } catch (err) {
+            _debugLog(`session recovery check failed: ${err.message}`);
+            // Non-fatal — proceed with new session
+          }
+
+          // Identify as relay, not browser extension — include sessionId + project info for recovery
           ws.send(JSON.stringify({
             type: 'relay_init',
-            payload: { pid: process.pid, role: 'stdio-relay', sessionId: this.sessionId },
+            payload: { pid: process.pid, role: 'stdio-relay', sessionId: this.sessionId, projectPath: process.cwd(), projectLabel: this.projectLabel },
           }));
 
           if (isInitial) resolve();
@@ -1781,7 +1178,7 @@ class BrowserBridgeServer {
 
     try {
       await this.bridge.start();
-      await this._startHealthServer();
+      this.healthServer = await startHealthServer(this.bridge, rateLimiter);
       _debugLog('start() primary mode — WS+Health bound OK');
       console.error('[BrowserBridge] Primary mode — owns WebSocket + Health servers');
     } catch (err) {

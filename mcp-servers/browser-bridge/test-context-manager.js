@@ -1,129 +1,15 @@
 /**
  * test-context-manager.js — Unit tests for ContextManager SQLite persistence
  *
- * Copies ContextManager implementation from server.js locally since it's not exported.
+ * Imports ContextManager from lib/context-manager.js.
  * Run with: node test-context-manager.js
  */
 
 import assert from 'node:assert/strict';
 import { describe, it, afterEach } from 'node:test';
-import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 
-// ---------------------------------------------------------------------------
-// Local copy of ContextManager (server.js doesn't export it)
-// ---------------------------------------------------------------------------
-
-const CONFIG = {
-  dbPath: ':memory:',
-  cleanupInterval: 300_000, // 5 min
-};
-
-class ContextManager {
-  constructor(dbPath = CONFIG.dbPath) {
-    this.db = new Database(dbPath);
-    this.db.pragma('journal_mode = WAL');
-    this.db.pragma('synchronous = NORMAL');
-    this.db.pragma('cache_size = 1000');
-    this._initSchema();
-    this.cleanupTimer = setInterval(() => this.cleanup(), CONFIG.cleanupInterval);
-  }
-
-  _initSchema() {
-    const sql = `
-      CREATE TABLE IF NOT EXISTS conversations (
-        id TEXT PRIMARY KEY,
-        title TEXT,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS messages (
-        id TEXT PRIMARY KEY,
-        conversation_id TEXT NOT NULL,
-        role TEXT NOT NULL,
-        content TEXT NOT NULL,
-        timestamp INTEGER NOT NULL,
-        FOREIGN KEY (conversation_id) REFERENCES conversations(id)
-      );
-
-      CREATE TABLE IF NOT EXISTS context_snapshots (
-        id TEXT PRIMARY KEY,
-        url TEXT,
-        title TEXT,
-        content TEXT,
-        tab_id INTEGER,
-        timestamp INTEGER NOT NULL
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_messages_conv
-        ON messages(conversation_id);
-      CREATE INDEX IF NOT EXISTS idx_snapshots_ts
-        ON context_snapshots(timestamp);
-    `;
-    this.db.exec(sql);
-  }
-
-  // --- Conversation CRUD ---
-
-  createConversation(title = 'Untitled') {
-    const id = randomUUID();
-    const now = Date.now();
-    this.db
-      .prepare('INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)')
-      .run(id, title, now, now);
-    return id;
-  }
-
-  addMessage(conversationId, role, content) {
-    const id = randomUUID();
-    this.db
-      .prepare('INSERT INTO messages (id, conversation_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)')
-      .run(id, conversationId, role, content, Date.now());
-    return id;
-  }
-
-  getConversation(conversationId) {
-    const conv = this.db
-      .prepare('SELECT * FROM conversations WHERE id = ?')
-      .get(conversationId);
-    if (!conv) return null;
-    const messages = this.db
-      .prepare('SELECT * FROM messages WHERE conversation_id = ? ORDER BY timestamp')
-      .all(conversationId);
-    return { ...conv, messages };
-  }
-
-  // --- Context snapshots ---
-
-  saveSnapshot(data) {
-    const id = randomUUID();
-    this.db
-      .prepare('INSERT INTO context_snapshots (id, url, title, content, tab_id, timestamp) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(id, data.url || '', data.title || '', JSON.stringify(data), data.tabId || null, Date.now());
-    return id;
-  }
-
-  getLatestSnapshot() {
-    return this.db
-      .prepare('SELECT * FROM context_snapshots ORDER BY timestamp DESC LIMIT 1')
-      .get() || null;
-  }
-
-  // --- Cleanup ---
-
-  cleanup() {
-    const cutoff = Date.now() - 86_400_000; // 24 hours
-    this.db.prepare('DELETE FROM context_snapshots WHERE timestamp < ?').run(cutoff);
-    this.db.prepare('DELETE FROM messages WHERE timestamp < ?').run(cutoff);
-    this.db.prepare('DELETE FROM conversations WHERE updated_at < ?').run(cutoff);
-  }
-
-  destroy() {
-    clearInterval(this.cleanupTimer);
-    try { this.db.close(); } catch { /* already closed */ }
-  }
-}
+import { ContextManager } from './lib/context-manager.js';
 
 // ---------------------------------------------------------------------------
 // Test Suite
@@ -144,7 +30,7 @@ describe('ContextManager — SQLite persistence', () => {
       SELECT name FROM sqlite_master WHERE type='table' ORDER BY name
     `).all().map(r => r.name);
 
-    assert.deepEqual(tables, ['context_snapshots', 'conversations', 'messages']);
+    assert.deepEqual(tables, ['context_snapshots', 'conversations', 'messages', 'relay_sessions']);
 
     // Check conversations table columns
     const convColumns = manager.db.prepare('PRAGMA table_info(conversations)').all();
@@ -369,19 +255,23 @@ describe('ContextManager — SQLite persistence', () => {
       SELECT name, tbl_name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%' ORDER BY name
     `).all();
 
-    // Expected: idx_messages_conv on messages, idx_snapshots_ts on context_snapshots
-    assert.equal(indexes.length, 2);
+    // Expected: idx_messages_conv, idx_relay_sessions_path, idx_snapshots_ts
+    assert.equal(indexes.length, 3);
 
     const indexNames = indexes.map(i => i.name);
     assert.ok(indexNames.includes('idx_messages_conv'));
     assert.ok(indexNames.includes('idx_snapshots_ts'));
+    assert.ok(indexNames.includes('idx_relay_sessions_path'));
 
-    // Verify index on correct table
+    // Verify indexes on correct tables
     const msgIndex = indexes.find(i => i.name === 'idx_messages_conv');
     assert.equal(msgIndex.tbl_name, 'messages');
 
     const snapIndex = indexes.find(i => i.name === 'idx_snapshots_ts');
     assert.equal(snapIndex.tbl_name, 'context_snapshots');
+
+    const relayIndex = indexes.find(i => i.name === 'idx_relay_sessions_path');
+    assert.equal(relayIndex.tbl_name, 'relay_sessions');
   });
 
   it('destroy() clears cleanup timer and closes DB', () => {
