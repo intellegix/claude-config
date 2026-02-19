@@ -142,7 +142,7 @@ export class WebSocketBridge extends EventEmitter {
 
       const timer = setTimeout(() => {
         this.pendingRequests.delete(browserRequestId);
-        this._send(ws, { requestId: relayRequestId, error: `Request timed out after ${timeout}ms` });
+        this._send(ws, { requestId: relayRequestId, error: `Request timed out after ${timeout}ms`, code: 'TIMEOUT' });
       }, timeout);
 
       this.pendingRequests.set(browserRequestId, {
@@ -150,7 +150,7 @@ export class WebSocketBridge extends EventEmitter {
           this._send(ws, { requestId: relayRequestId, result });
         },
         reject: (err) => {
-          this._send(ws, { requestId: relayRequestId, error: err.message });
+          this._send(ws, { requestId: relayRequestId, error: err.message, ...(err.code && { code: err.code }) });
         },
         timer,
       });
@@ -167,7 +167,9 @@ export class WebSocketBridge extends EventEmitter {
       this.pendingRequests.delete(msg.requestId);
       clearTimeout(pending.timer);
       if (msg.error) {
-        pending.reject(new Error(msg.error));
+        const err = new Error(msg.error);
+        if (msg.code) err.code = msg.code;
+        pending.reject(err);
       } else {
         pending.resolve(msg.result || msg);
       }
@@ -228,7 +230,9 @@ export class WebSocketBridge extends EventEmitter {
       const timer = setTimeout(() => {
         this.pendingRequests.delete(requestId);
         log.warn('broadcast_timeout', { requestId, type: message.type, timeout });
-        reject(new Error(`Request timed out after ${timeout}ms`));
+        const err = new Error(`Request timed out after ${timeout}ms`);
+        err.code = 'TIMEOUT';
+        reject(err);
       }, timeout);
 
       this.pendingRequests.set(requestId, {

@@ -35,6 +35,7 @@ import { RateLimiter } from './lib/rate-limiter.js';
 import { ContextManager } from './lib/context-manager.js';
 import { WebSocketBridge } from './lib/websocket-bridge.js';
 import { startHealthServer } from './lib/health-server.js';
+import { MetricsCollector } from './lib/metrics.js';
 
 _debugLog(`imports OK — cwd=${process.cwd()} argv=${process.argv.join(' ')} ppid=${process.ppid}`);
 
@@ -49,6 +50,7 @@ class BrowserBridgeServer {
     _debugLog('constructor entered');
     this.contextManager = new ContextManager();
     this.bridge = new WebSocketBridge();
+    this.metrics = new MetricsCollector();
     this.healthServer = null;
     this.sessionId = randomUUID(); // Unique per CLI instance — used for tab group isolation
     this.projectLabel = basename(process.cwd()); // e.g. "Intellegix Chrome Ext"
@@ -459,15 +461,18 @@ class BrowserBridgeServer {
       // Rate limiting
       if (!rateLimiter.check(this.sessionId)) {
         log.warn('rate_limited', { tool: name, sessionId: this.sessionId });
+        this.metrics.record(name, Date.now() - start, false, 'RATE_LIMITED');
         return {
-          content: [{ type: 'text', text: 'Error: Rate limit exceeded (60 req/min). Please wait.' }],
+          content: [{ type: 'text', text: JSON.stringify({ error: 'Rate limit exceeded (60 req/min). Please wait.', code: 'RATE_LIMITED' }) }],
           isError: true,
         };
       }
 
       try {
         const result = await this._handleToolCall(name, args || {});
-        log.info('tool_result', { tool: name, duration: Date.now() - start, success: true });
+        const duration = Date.now() - start;
+        log.info('tool_result', { tool: name, duration, success: true });
+        this.metrics.record(name, duration, true);
 
         // Screenshot results carry _screenshotData — return as MCP image content
         if (result && result._screenshotData) {
@@ -485,9 +490,11 @@ class BrowserBridgeServer {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
         };
       } catch (err) {
-        log.error('tool_error', { tool: name, duration: Date.now() - start, error: err.message });
+        const duration = Date.now() - start;
+        log.error('tool_error', { tool: name, duration, error: err.message, code: err.code });
+        this.metrics.record(name, duration, false, err.code);
         return {
-          content: [{ type: 'text', text: `Error: ${err.message}` }],
+          content: [{ type: 'text', text: JSON.stringify({ error: err.message, ...(err.code && { code: err.code }) }) }],
           isError: true,
         };
       }
@@ -1058,7 +1065,9 @@ class BrowserBridgeServer {
               this._relayPending.delete(msg.requestId);
               clearTimeout(pending.timer);
               if (msg.error) {
-                pending.reject(new Error(msg.error));
+                const err = new Error(msg.error);
+                if (msg.code) err.code = msg.code;
+                pending.reject(err);
               } else {
                 pending.resolve(msg.result);
               }
@@ -1142,7 +1151,9 @@ class BrowserBridgeServer {
         return new Promise((resolve, reject) => {
           const timer = setTimeout(() => {
             this._relayPending.delete(requestId);
-            reject(new Error(`Relay request timed out after ${timeout}ms`));
+            const err = new Error(`Relay request timed out after ${timeout}ms`);
+            err.code = 'TIMEOUT';
+            reject(err);
           }, timeout);
 
           this._relayPending.set(requestId, { resolve, reject, timer });
@@ -1178,7 +1189,7 @@ class BrowserBridgeServer {
 
     try {
       await this.bridge.start();
-      this.healthServer = await startHealthServer(this.bridge, rateLimiter);
+      this.healthServer = await startHealthServer(this.bridge, rateLimiter, this.metrics);
       _debugLog('start() primary mode — WS+Health bound OK');
       console.error('[BrowserBridge] Primary mode — owns WebSocket + Health servers');
     } catch (err) {
@@ -1233,6 +1244,7 @@ class BrowserBridgeServer {
 
     this.bridge.stop();
     this.contextManager.destroy();
+    this.metrics.destroy();
 
     if (this.healthServer) {
       await new Promise((resolve) => this.healthServer.close(resolve));
