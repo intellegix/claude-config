@@ -91,6 +91,7 @@ DIRECT_TIMEOUT = 60  # seconds per direct provider call
 # Playwright headful runs in the background and doesn't need user interaction.
 BROWSER_HEADLESS = False
 BROWSER_TIMEOUT = 180_000  # ms, total timeout for council query
+BROWSER_RESEARCH_TIMEOUT = 360_000  # ms, deep research takes 2-4 min
 BROWSER_STABLE_MS = 8_000  # ms, content unchanged = stable
 BROWSER_POLL_INTERVAL = 2_000  # ms, check interval
 BROWSER_TYPE_DELAY = 30  # ms between keystrokes

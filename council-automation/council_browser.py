@@ -29,6 +29,7 @@ from council_config import (
     BROWSER_SESSION_PATH,
     BROWSER_SESSIONS_DIR,
     BROWSER_STABLE_MS,
+    BROWSER_RESEARCH_TIMEOUT,
     BROWSER_TIMEOUT,
     BROWSER_TYPE_DELAY,
     BROWSER_USER_DATA_DIR,
@@ -90,11 +91,10 @@ class SessionSemaphore:
                 continue
 
             # Check PID liveness
-            # Windows os.kill(pid, 0) can raise SystemError, not just OSError
             pid_alive = True
             try:
                 os.kill(pid, 0)
-            except (OSError, SystemError):
+            except OSError:
                 pid_alive = False
 
             # Remove if PID is dead or TTL expired
@@ -261,7 +261,11 @@ class PerplexityCouncil:
     ):
         self.headless = headless
         self.session_path = session_path or BROWSER_SESSION_PATH
-        self.timeout = timeout
+        # Research mode gets longer timeout — deep research routinely takes 2-4 min
+        if timeout == BROWSER_TIMEOUT and perplexity_mode == "research":
+            self.timeout = BROWSER_RESEARCH_TIMEOUT
+        else:
+            self.timeout = timeout
         self.save_artifacts = save_artifacts
         self.perplexity_mode = perplexity_mode
         self.use_persistent = use_persistent

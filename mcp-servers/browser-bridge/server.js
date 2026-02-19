@@ -857,8 +857,8 @@ class BrowserBridgeServer {
         if (isResearch) scriptArgs.push('--perplexity-mode', 'research');
         scriptArgs.push(query);
 
-        // Browser/auto modes need longer timeout; research mode needs even more (deep research does multiple rounds)
-        const timeout = isResearch ? 300_000 : (mode === 'browser' || mode === 'auto') ? 210_000 : 150_000;
+        // Browser/auto modes need longer timeout; research mode needs even more (deep research takes 2-4 min)
+        const timeout = isResearch ? 420_000 : (mode === 'browser' || mode === 'auto') ? 210_000 : 150_000;
         const result = execFileSync('python', scriptArgs, {
           timeout,
           encoding: 'utf-8',
