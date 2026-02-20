@@ -95,6 +95,11 @@ BROWSER_RESEARCH_TIMEOUT = 360_000  # ms, deep research takes 2-4 min
 BROWSER_LABS_TIMEOUT = 840_000  # ms, labs mode — 14 min (1 min buffer under 15 min MCP timeout)
 BROWSER_STABLE_MS = 8_000  # ms, content unchanged = stable
 BROWSER_POLL_INTERVAL = 2_000  # ms, check interval
+
+# Mode-aware stability thresholds (research/labs pause >8s between sections)
+BROWSER_STABLE_MS_RESEARCH = 25_000   # ms, research pauses 10-15s between sections
+BROWSER_STABLE_MS_LABS = 30_000       # ms, labs can pause even longer
+BROWSER_POLL_INTERVAL_RESEARCH = 3_000  # ms, slightly slower polling for long responses
 BROWSER_TYPE_DELAY = 30  # ms between keystrokes
 BROWSER_USER_DATA_DIR = Path.home() / ".claude" / "config" / "playwright-chrome-profile"
 BROWSER_SESSION_PATH = Path.home() / ".claude" / "config" / "playwright-session.json"

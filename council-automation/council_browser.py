@@ -27,9 +27,12 @@ from council_config import (
     BROWSER_LABS_TIMEOUT,
     BROWSER_LOCALSTORAGE_PATH,
     BROWSER_POLL_INTERVAL,
+    BROWSER_POLL_INTERVAL_RESEARCH,
     BROWSER_SESSION_PATH,
     BROWSER_SESSIONS_DIR,
     BROWSER_STABLE_MS,
+    BROWSER_STABLE_MS_LABS,
+    BROWSER_STABLE_MS_RESEARCH,
     BROWSER_RESEARCH_TIMEOUT,
     BROWSER_TIMEOUT,
     BROWSER_TYPE_DELAY,
@@ -635,6 +638,59 @@ class PerplexityCouncil:
         _log("WARNING: Could not verify labs activation, proceeding anyway")
         return True  # Proceed optimistically
 
+    async def _detect_dom_completion(self, page) -> dict:
+        """Check Perplexity DOM for completion signals (research/labs modes)."""
+        return await page.evaluate("""() => {
+            // Signal 1: No streaming/loading indicators
+            const streaming = document.querySelectorAll(
+                '[class*="streaming"], [class*="loading"], [class*="generating"], '
+                + '[class*="animate-pulse"], [class*="animate-spin"]'
+            );
+
+            // Signal 2: Sources/citations section visible
+            const sources = document.querySelector(
+                '[class*="source"], [class*="citation"], [data-testid*="source"]'
+            );
+
+            // Signal 3: Share/copy/rewrite action buttons (appear after completion)
+            const actions = document.querySelectorAll(
+                'button[aria-label*="Share"], button[aria-label*="Copy"], '
+                + 'button[aria-label*="Rewrite"]'
+            );
+
+            // Signal 4: Follow-up input re-enabled
+            const followUp = document.querySelector(
+                'textarea:not([disabled]), #ask-input'
+            );
+
+            // Signal 5: "Related" section at bottom
+            const related = document.querySelector(
+                '[class*="related"], [data-testid*="related"]'
+            );
+
+            return {
+                isStreaming: streaming.length > 0,
+                hasSources: !!sources,
+                hasActionButtons: actions.length >= 2,
+                hasFollowUp: !!followUp,
+                hasRelated: !!related,
+            };
+        }""")
+
+    async def _get_text_length(self, page) -> int:
+        """Get current text length of the main response element."""
+        try:
+            return await page.evaluate("""() => {
+                const report = document.querySelector('div.prose.max-w-none');
+                if (report) return report.innerText.length;
+                const proses = Array.from(document.querySelectorAll('div.prose'));
+                if (proses.length === 0) return 0;
+                proses.sort((a, b) => b.innerText.length - a.innerText.length);
+                return proses[0].innerText.length;
+            }""")
+        except Exception:
+            return 0
+
     async def activate_council(self, page) -> bool:
         """Activate council mode. Delegates to activate_mode()."""
         return await self.activate_mode(page)
@@ -764,6 +820,9 @@ class PerplexityCouncil:
             return await self._wait_vision(page, timeout, start)
         else:
             _log("Vision monitoring unavailable (no ANTHROPIC_API_KEY), using CSS fallback")
+            # Route research/labs to dedicated fallback (mode-aware stability)
+            if self.perplexity_mode in ("research", "labs"):
+                return await self._wait_research_fallback(page, timeout, start)
             return await self._wait_css_fallback(page, timeout, start)
 
     async def _wait_vision(self, page, timeout: int, start: float) -> bool:
@@ -773,6 +832,10 @@ class PerplexityCouncil:
         Requires seeing 'synthesizing' before trusting 'complete', and
         requires 2 consecutive 'complete' polls for confidence.
         """
+        # Route research/labs to dedicated vision method (different prompt)
+        if self.perplexity_mode in ("research", "labs"):
+            return await self._wait_vision_research(page, timeout, start)
+
         poll_interval = VISION_POLL_INTERVAL_MODELS
         all_models_done = False
         seen_synthesizing = False
@@ -836,6 +899,111 @@ class PerplexityCouncil:
         _log(f"Vision: timed out after {time.time() - start:.1f}s")
         return False
 
+    async def _analyze_research_screenshot(self, screenshot_bytes: bytes) -> dict:
+        """Send screenshot to Claude Haiku for research/labs page state analysis."""
+        import anthropic
+
+        b64 = base64.b64encode(screenshot_bytes).decode()
+
+        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+
+        response = client.messages.create(
+            model=VISION_MODEL,
+            max_tokens=VISION_MAX_TOKENS,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": b64,
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": (
+                            "Analyze this Perplexity research/labs page screenshot. "
+                            "Return ONLY valid JSON (no markdown, no explanation):\n"
+                            '{"page_state":"<state>","loading_active":<bool>,'
+                            '"error_text":"<text or empty>"}\n\n'
+                            "page_state values:\n"
+                            '- "loading": page is loading, no response yet\n'
+                            '- "generating": response is actively streaming '
+                            "(text appearing, cursor visible, content growing)\n"
+                            '- "complete": response is FULLY rendered AND '
+                            "sources/citations visible at bottom. No streaming.\n"
+                            '- "error": error message visible\n\n'
+                            "CRITICAL: Do NOT report 'complete' if text is still "
+                            "appearing or growing."
+                        ),
+                    },
+                ],
+            }],
+            timeout=15,
+        )
+
+        text = response.content[0].text.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+
+        return json.loads(text)
+
+    async def _wait_vision_research(self, page, timeout: int, start: float) -> bool:
+        """Vision-based completion detection for research/labs modes.
+
+        Simplified state machine: generating -> complete (no model checkmarks).
+        Requires 2 consecutive 'complete' polls for confidence.
+        """
+        poll_interval = VISION_POLL_INTERVAL_MODELS
+        seen_generating = False
+        consecutive_complete = 0
+
+        _log("Vision monitoring (research/labs): polling with Haiku screenshot analysis...")
+
+        while (time.time() - start) * 1000 < timeout:
+            try:
+                screenshot = await page.screenshot(type="jpeg", quality=VISION_JPEG_QUALITY)
+                state = await self._analyze_research_screenshot(screenshot)
+
+                page_state = state.get("page_state", "unknown")
+                _log(f"  Vision (research): state={page_state}")
+
+                if page_state == "error":
+                    error = state.get("error_text", "unknown error")
+                    _log(f"Vision: error detected: {error}")
+                    return False
+
+                if page_state == "generating":
+                    seen_generating = True
+                    consecutive_complete = 0
+                    poll_interval = VISION_POLL_INTERVAL_SYNTHESIS
+
+                if page_state == "complete":
+                    if not seen_generating:
+                        _log("  Vision reported 'complete' but no generating seen yet — treating as generating")
+                        seen_generating = True
+                        poll_interval = VISION_POLL_INTERVAL_SYNTHESIS
+                    else:
+                        consecutive_complete += 1
+                        if consecutive_complete >= 2:
+                            _log(f"Vision (research): page complete (confirmed 2x) ({time.time() - start:.1f}s)")
+                            return True
+                        _log("  Vision (research): complete (need 1 more confirmation)")
+                else:
+                    consecutive_complete = 0
+
+            except json.JSONDecodeError as e:
+                _log(f"  Vision: failed to parse Haiku response: {e}")
+            except Exception as e:
+                _log(f"  Vision: analysis error: {e}")
+
+            await asyncio.sleep(poll_interval)
+
+        _log(f"Vision (research): timed out after {time.time() - start:.1f}s")
+        return False
+
     async def _wait_css_fallback(self, page, timeout: int, start: float) -> bool:
         """CSS selector + stability fallback (original implementation)."""
         # Phase A: Wait for model completion indicators
@@ -895,6 +1063,53 @@ class PerplexityCouncil:
             await asyncio.sleep(poll_interval)
 
         _log(f"Completion wait timed out after {time.time() - start:.1f}s")
+        return False
+
+    async def _wait_research_fallback(self, page, timeout: int, start: float) -> bool:
+        """Completion detection for research/labs modes (no model cards).
+
+        Unlike council CSS fallback, this:
+        - Skips Phase A (no model checkmarks in research/labs)
+        - Uses longer stability threshold (25-30s vs 8s)
+        - Checks DOM signals (sources, action buttons) as primary completion
+        - Tracks text growth to prevent false stability on pauses
+        """
+        # Mode-aware thresholds
+        if self.perplexity_mode == "labs":
+            stable_ms = BROWSER_STABLE_MS_LABS
+        else:
+            stable_ms = BROWSER_STABLE_MS_RESEARCH
+        poll_interval = BROWSER_POLL_INTERVAL_RESEARCH / 1000  # 3s
+        stable_threshold = stable_ms / 1000  # 25s or 30s
+
+        last_text_len = 0
+        stable_since = time.time()
+        _log(f"Research/labs fallback: polling with {stable_threshold}s stability threshold...")
+
+        while (time.time() - start) * 1000 < timeout:
+            # Layer 1: DOM signals (highest confidence)
+            try:
+                dom = await self._detect_dom_completion(page)
+                if not dom['isStreaming'] and dom['hasActionButtons'] and (dom['hasSources'] or dom['hasRelated']):
+                    _log(f"Completion via DOM signals (sources={dom['hasSources']}, actions={dom['hasActionButtons']})")
+                    return True
+            except Exception:
+                pass
+
+            # Layer 2: Text growth tracking
+            current_len = await self._get_text_length(page)
+            if current_len != last_text_len:
+                last_text_len = current_len
+                stable_since = time.time()  # Reset — content still growing
+
+            # Layer 3: Stability timeout (mode-aware)
+            if current_len > 100 and (time.time() - stable_since) >= stable_threshold:
+                _log(f"Completion via text stability ({stable_threshold}s, {current_len} chars)")
+                return True
+
+            await asyncio.sleep(poll_interval)
+
+        _log(f"Research/labs fallback timed out after {time.time() - start:.1f}s")
         return False
 
     async def _find_model_cards(self, page) -> list:
