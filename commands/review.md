@@ -67,6 +67,15 @@ If no target specified, review staged changes: `git diff --cached`
    - Large lists virtualized
    - No memory leaks (cleanup in useEffect)
 
+### Step 6: Portfolio Compliance Review
+
+8. **Over-engineering check**
+   - Read `~/.claude/portfolio/PORTFOLIO.md`
+   - Is complexity appropriate for this project's tier and user count?
+   - Are there enterprise patterns that don't belong at this scale?
+   - Does the change respect phase restrictions?
+   - Flag over-engineering as a "Must Fix" issue.
+
 ## Output Format
 
 ```markdown

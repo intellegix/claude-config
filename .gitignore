@@ -7,10 +7,13 @@
 
 # Include the directories we want to track
 !.gitignore
+!CLAUDE.md
 !council-automation/
 !council-automation/**
 !commands/
 !commands/**
+!portfolio/
+!portfolio/**
 !mcp-servers/
 !mcp-servers/browser-bridge/
 !mcp-servers/browser-bridge/**

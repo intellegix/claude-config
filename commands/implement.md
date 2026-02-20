@@ -4,6 +4,13 @@ Implement the feature described: $ARGUMENTS
 
 ## Implementation Process
 
+### Phase 0: Portfolio Gate
+0. **Check project constraints**
+   - Read `~/.claude/portfolio/PORTFOLIO.md`
+   - If Maintenance phase: ONLY bug fixes. Reject feature requests.
+   - If Prototype phase: Skip tests, skip types, skip CI.
+   - Match complexity to tier. T3/T4 = simplest possible implementation.
+
 ### Phase 1: Planning (Types First)
 
 1. **Clarify Requirements**

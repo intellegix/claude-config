@@ -4,6 +4,14 @@ Create a comprehensive implementation plan for: $ARGUMENTS
 
 ## Planning Process
 
+### Phase 0: Portfolio Context
+0. **Check portfolio constraints**
+   - Read `~/.claude/portfolio/PORTFOLIO.md`
+   - What tier and phase is this project?
+   - Does this plan respect the phase restrictions and anti-patterns?
+   - Is the complexity appropriate for the user count?
+   - If adding enterprise patterns to a <10 user app, STOP and simplify.
+
 ### Phase 1: Requirements Analysis
 1. **Clarify scope**
    - What is the expected outcome?
