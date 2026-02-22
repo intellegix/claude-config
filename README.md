@@ -1,4 +1,4 @@
-# claude-config
+# claude-code-toolkit
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11+-green.svg)](https://python.org)
@@ -111,7 +111,7 @@ A modular configuration system for Claude Code CLI. Includes an automated loop d
 
 ```bash
 # Clone to ~/.claude (or your Claude Code config directory)
-git clone https://github.com/yourusername/claude-config.git ~/.claude
+git clone https://github.com/yourusername/claude-code-toolkit.git ~/.claude
 
 # Install automated loop dependencies
 cd ~/.claude/automated-loop
