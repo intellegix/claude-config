@@ -295,6 +295,32 @@ Place in `~/.claude/commands/` and invoke from Claude Code with `/<command-name>
 | `/portfolio-status` | Portfolio-wide project status review |
 | `/cache-perplexity-session` | Refresh Perplexity browser session cookies |
 
+#### Authoring Custom Commands
+
+Create a markdown file in `~/.claude/commands/` — Claude Code auto-discovers all `.md` files in this directory. No YAML frontmatter needed; the file is pure markdown.
+
+Use `$ARGUMENTS` as a placeholder for whatever the user types after the command name:
+
+```markdown
+# Explain Code
+
+Explain the following code in detail: $ARGUMENTS
+
+## Instructions
+- Identify the language and framework
+- Describe the overall purpose
+- Walk through the logic step by step
+- Note any potential issues or improvements
+```
+
+Save this as `~/.claude/commands/explain.md`, then invoke it from Claude Code:
+
+```
+/explain src/utils/parser.py
+```
+
+The `$ARGUMENTS` variable is replaced with `src/utils/parser.py` at invocation time.
+
 ### Council Automation
 
 Queries multiple AI models through Perplexity and synthesizes results with Opus.
@@ -331,17 +357,46 @@ The extension auto-connects to `ws://127.0.0.1:8765`.
 
 #### Claude Code Configuration
 
-Add to your MCP settings (`~/.claude/settings.json` or project `.mcp.json`):
+MCP servers are configured in `~/.claude/mcp.json` (global) or `.mcp.json` (project-level), **not** in `settings.json`.
+
 ```json
 {
   "mcpServers": {
     "browser-bridge": {
       "command": "node",
-      "args": ["~/.claude/mcp-servers/browser-bridge/server.js"]
+      "args": ["C:\\Users\\YourName\\.claude\\mcp-servers\\browser-bridge\\server.js"]
     }
   }
 }
 ```
+
+A more complete example with multiple servers:
+
+```json
+{
+  "mcpServers": {
+    "browser-bridge": {
+      "command": "node",
+      "args": ["C:\\Users\\YourName\\.claude\\mcp-servers\\browser-bridge\\server.js"]
+    },
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@executeautomation/playwright-mcp-server"]
+    }
+  }
+}
+```
+
+Each server entry supports `command` (executable), `args` (argument array), and optionally `env` (environment variable overrides).
+
+> **Windows note**: Use absolute paths with double-backslash escaping in JSON. The `~` shorthand does not expand inside JSON values.
+
+**CLI shortcut**: You can also add servers via the command line:
+```bash
+claude mcp add browser-bridge -- node ~/.claude/mcp-servers/browser-bridge/server.js
+```
+
+**Verify connection**: Run `/mcp` inside Claude Code to list connected MCP servers and their status.
 
 ### Portfolio Governance
 
@@ -360,13 +415,71 @@ Copy `portfolio/PORTFOLIO.md.example` to `portfolio/PORTFOLIO.md` and register y
 
 ### CLAUDE.md
 
-Copy `CLAUDE.md.example` to `CLAUDE.md` and customize with your identity, projects, and preferences. The global `CLAUDE.md` file configures Claude Code's behavior across all projects. Key sections:
+Copy `CLAUDE.md.example` to `CLAUDE.md` and customize. Claude Code loads `CLAUDE.md` files at multiple levels, merging them in order:
 
-- **Identity** - Your name, role, and organization
-- **Code Standards** - Language-specific conventions
-- **Agent Behavior** - Planning discipline and verification rules
-- **Add-ons** - Domain-specific context modules
-- **Portfolio Governance** - Project tier constraints
+1. **Managed** — enterprise-managed config (if applicable)
+2. **Project** — `CLAUDE.md` files found by walking from `cwd` up to the repo root (all are loaded, closest wins on conflicts)
+3. **User global** — `~/.claude/CLAUDE.md`
+4. **Local** — `CLAUDE.local.md` (same directory as a project `CLAUDE.md`, for personal overrides)
+
+**Project vs. local**: Commit `CLAUDE.md` to git so the whole team shares it. Use `CLAUDE.local.md` (add to `.gitignore`) for personal preferences that shouldn't be shared.
+
+**Key sections and what they control**:
+
+| Section | Effect |
+|---------|--------|
+| **Identity** | Sets persona (name, role, org) for response style |
+| **Code Standards** | Enforced during code generation — naming, patterns, type hints |
+| **Agent Behavior** | Controls planning discipline, verification steps, autonomous patterns |
+| **Add-ons** | Domain-specific context modules activated per-project |
+| **Portfolio Governance** | Project tier constraints — complexity budgets, testing requirements |
+| **Commands** | Documents available slash commands for discoverability |
+
+The template at `CLAUDE.md.example` has all sections with placeholder values — fill in your details.
+
+### settings.json
+
+Located at `~/.claude/settings.json`. Controls global permissions and plugin management. **MCP servers are not configured here** — use [`mcp.json`](#claude-code-configuration) instead.
+
+**Permissions** — `allow` and `deny` lists control which tools Claude Code can use without prompting:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(git status)",
+      "Bash(pytest:*)",
+      "Read(**/*.py)",
+      "Write(**/*.py)",
+      "Edit(**/*.py)"
+    ],
+    "deny": [
+      "Bash(rm -rf /)",
+      "Bash(sudo:*)",
+      "Read(.env)",
+      "Read(**/*.pem)"
+    ]
+  }
+}
+```
+
+Permission patterns use the format `Tool(pattern)`:
+- `Bash(command:*)` — allow a CLI command with any arguments
+- `Read(**/*.ext)` — allow reading files matching a glob
+- `Write(**/*.py)` — allow writing Python files
+- Deny rules take precedence over allow rules
+
+**Plugins** — enable or disable plugins from the official registry:
+
+```json
+{
+  "enabledPlugins": {
+    "code-review@claude-plugins-official": true,
+    "commit-commands@claude-plugins-official": true,
+    "superpowers@claude-plugins-official": true
+  }
+}
+```
 
 ### Automated Loop Config
 
