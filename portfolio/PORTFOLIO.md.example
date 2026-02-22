@@ -1,5 +1,5 @@
 # Portfolio Registry v1.0
-# Austin Kidwell | Intellegix + ASR Inc
+# <Your Name> | <Your Organization>
 
 ## Velocity Constraints
 - MAX 2 active feature branches across all projects
@@ -11,21 +11,11 @@
 
 | Project | Tier | Phase | Users | Next Priority | DO NOT |
 |---------|------|-------|-------|--------------|--------|
-| Certified Payroll 2.0 | T1 | Maintenance | 2 | Bug fixes only | Add features, add infra, refactor |
-| ASR Records App | T1 | Development | 5 | Core CRUD | Over-engineer, add monitoring |
-| P.O. System | T1 | Development | 3 | Clark Rep sync | Add analytics, add dashboards |
-| AI Audio Transcriber | T2 | Development | 1 | Core transcription | Add auth, add rate limiting |
-| Automated Claude | T2 | Development | 1 | CLI workflow | Add UI, add database |
-| Claude Watcher | T2 | Prototype | 1 | Working MVP | Add tests, add CI, add types |
-| AI TV 2.0 | T2 | Development | 2 | Content pipeline | Add billing, add user mgmt |
-| AI Tuxemon | T3 | Prototype | 1 | Playable demo | Add anything beyond gameplay |
-| Languages App | T3 | Prototype | 1 | Working vocab UI | Add backend, add auth |
-| Remote Mobile UI | T3 | Maintenance | 1 | Keep running | Kill the server process |
-| Perplexity Voice | T3 | Prototype | 1 | Voice input works | Add UI polish, add settings |
-| Podcast Builder | T3 | Prototype | 1 | Audio generation | Add hosting, add analytics |
-| PokeFireRed | T4 | Archive | 0 | None | Touch it |
-| Intellegix Chrome Ext | T4 | Archive | 0 | None | Touch it |
-| AI City Experiment | T4 | Archive | 0 | None | Touch it |
+| Example Production App | T1 | Maintenance | 10 | Bug fixes only | Add features, add infra, refactor |
+| Example Internal Tool | T1 | Development | 5 | Core CRUD | Over-engineer, add monitoring |
+| Automated Claude Loop | T2 | Development | 1 | CLI workflow | Add UI, add database |
+| Example Side Project | T3 | Prototype | 1 | Working MVP | Add tests, add CI |
+| Example Archived App | T4 | Archive | 0 | None | Touch it |
 
 ## Tier Definitions
 

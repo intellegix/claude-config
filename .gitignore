@@ -1,13 +1,19 @@
 # ~/.claude git repo
-# Only track: council-automation/, commands/, mcp-servers/browser-bridge/
-# Everything else is excluded
+# Track: council-automation/, commands/, mcp-servers/browser-bridge/,
+#        portfolio/, automated-loop/, and root docs
 
 # Exclude everything by default
 *
 
-# Include the directories we want to track
+# Include root files
 !.gitignore
-!CLAUDE.md
+!CLAUDE.md.example
+!LICENSE
+!NOTICE
+!README.md
+!perplexity-selectors.json
+
+# Include tracked directories
 !council-automation/
 !council-automation/**
 !commands/
@@ -17,11 +23,27 @@
 !mcp-servers/
 !mcp-servers/browser-bridge/
 !mcp-servers/browser-bridge/**
+!automated-loop/
+!automated-loop/**
 
 # Exclude generated/runtime files within tracked dirs
 council-automation/__pycache__/
 mcp-servers/browser-bridge/node_modules/
 mcp-servers/browser-bridge/package-lock.json
+
+# Automated loop runtime exclusions
+automated-loop/__pycache__/
+automated-loop/.pytest_cache/
+automated-loop/.env
+automated-loop/.workflow/state.json
+automated-loop/.workflow/*.log
+automated-loop/.workflow/research_result*.md
+automated-loop/.workflow/metrics_summary*.json
+automated-loop/.workflow/trace*.jsonl
+
+# Personal config files (use .example templates for public repo)
+CLAUDE.md
+portfolio/PORTFOLIO.md
 
 # Exclude sensitive config
 config/

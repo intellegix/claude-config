@@ -12,7 +12,9 @@ import { randomUUID } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 
 const WS_URL = 'ws://127.0.0.1:8765';
-const SAVE_DIR = 'C:\\Users\\AustinKidwell\\Desktop';
+const SAVE_DIR = process.env.USERPROFILE
+  ? `${process.env.USERPROFILE}\\Desktop`
+  : `${process.env.HOME}/Desktop`;
 
 function connect() {
   return new Promise((resolve, reject) => {

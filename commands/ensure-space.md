@@ -13,7 +13,7 @@ Ensure the current Perplexity thread is filed into a Space named after the activ
 ### Step 1: Determine Space Name
 
 - If `$ARGUMENTS` is provided and non-empty, use it as the space name
-- Otherwise, derive from the current working directory: use `path.basename(process.cwd())` (e.g., "Intellegix Chrome Ext")
+- Otherwise, derive from the current working directory: use `path.basename(process.cwd())` (e.g., "my-project")
 
 ### Step 2: Add to Space
 

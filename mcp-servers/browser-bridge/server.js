@@ -53,7 +53,7 @@ class BrowserBridgeServer {
     this.metrics = new MetricsCollector();
     this.healthServer = null;
     this.sessionId = randomUUID(); // Unique per CLI instance — used for tab group isolation
-    this.projectLabel = basename(process.cwd()); // e.g. "Intellegix Chrome Ext"
+    this.projectLabel = basename(process.cwd()); // e.g. "my-project"
 
     this.server = new Server(
       { name: 'claude-browser-bridge', version: '1.0.0' },

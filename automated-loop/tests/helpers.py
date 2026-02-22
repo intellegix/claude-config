@@ -1,0 +1,185 @@
+"""Shared test helpers for the automated Claude loop test suite.
+
+Fixtures are in conftest.py. This module contains non-fixture helpers
+(mock builders, NDJSON stream builders) used across multiple test files.
+"""
+
+import io
+import json
+from unittest.mock import MagicMock
+
+
+# --- NDJSON stream builders ---
+
+def build_ndjson_stream(
+    session_id: str,
+    cost: float,
+    turns: int,
+    result_text: str,
+    is_error: bool = False,
+    duration_ms: int = 10000,
+) -> str:
+    """Build a realistic NDJSON stream string matching Claude CLI output format."""
+    lines = [
+        json.dumps({"type": "init", "session_id": session_id}),
+        json.dumps({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": result_text}],
+            },
+            "session_id": session_id,
+        }),
+        json.dumps({
+            "type": "result",
+            "session_id": session_id,
+            "total_cost_usd": cost,
+            "total_duration_ms": duration_ms,
+            "num_turns": turns,
+            "result": result_text,
+            "is_error": is_error,
+        }),
+    ]
+    return "\n".join(lines)
+
+
+# --- Subprocess mock helpers ---
+
+def mock_playwright_result(synthesis: str = "Keep going") -> MagicMock:
+    """Build a mock subprocess result for Playwright research."""
+    return MagicMock(
+        returncode=0,
+        stdout=json.dumps({
+            "synthesis": synthesis,
+            "models": ["perplexity-research"],
+            "citations": [],
+            "execution_time_ms": 30000,
+        }),
+        stderr="",
+    )
+
+
+def mock_playwright_error(error: str = "Browser timeout") -> MagicMock:
+    """Build a mock subprocess result for Playwright error."""
+    return MagicMock(
+        returncode=0,
+        stdout=json.dumps({
+            "error": error,
+            "synthesis": "",
+            "execution_time_ms": 0,
+        }),
+        stderr="",
+    )
+
+
+def mock_git_log_result() -> MagicMock:
+    """Mock result for git log (not a git repo)."""
+    return MagicMock(returncode=128, stdout="", stderr="not a git repo")
+
+
+def make_subprocess_dispatcher(
+    claude_result=None,
+    claude_side_effect=None,
+    research_result=None,
+    research_side_effect=None,
+):
+    """Create a subprocess.run mock that dispatches based on command.
+
+    - git commands -> mock_git_log_result()
+    - claude commands -> claude_result or raise claude_side_effect
+    - council_browser commands -> research_result or raise research_side_effect
+    """
+    def side_effect(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args", [])
+        if isinstance(cmd, list) and cmd:
+            if cmd[0] == "git":
+                return mock_git_log_result()
+            if cmd[0] == "claude":
+                # Handle preflight check (claude --version)
+                if len(cmd) >= 2 and cmd[1] == "--version":
+                    return MagicMock(returncode=0, stdout="claude 1.0.0-test\n", stderr="")
+                if claude_side_effect is not None:
+                    raise claude_side_effect
+                return claude_result
+            if len(cmd) > 1 and "claude" in str(cmd[1]):
+                if claude_side_effect is not None:
+                    raise claude_side_effect
+                return claude_result
+            if "council_browser" in str(cmd):
+                if research_side_effect is not None:
+                    raise research_side_effect
+                return research_result
+        # Default fallback
+        if claude_result is not None:
+            return claude_result
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    return side_effect
+
+
+def make_research_dispatcher(playwright_result=None, playwright_side_effect=None):
+    """Create a subprocess.run mock for research bridge tests.
+
+    Git log calls get a no-op result. Council browser calls get playwright_result
+    or raise playwright_side_effect.
+    """
+    def side_effect(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args", [])
+        if isinstance(cmd, list) and cmd and cmd[0] == "git":
+            return mock_git_log_result()
+        if playwright_side_effect is not None:
+            raise playwright_side_effect
+        return playwright_result
+
+    return side_effect
+
+
+# --- Popen mock for streaming NDJSON (replaces subprocess.run for Claude CLI) ---
+
+class MockPopen:
+    """Mock subprocess.Popen that yields NDJSON lines from stdout.
+
+    Used for testing _invoke_claude which reads stdout line-by-line.
+    """
+
+    def __init__(self, ndjson_stream: str, returncode: int = 0) -> None:
+        self.stdout = io.StringIO(ndjson_stream)
+        self.stderr = io.StringIO("")
+        self.returncode = returncode
+        self.pid = 99999
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self.returncode
+
+    def kill(self) -> None:
+        pass
+
+
+def make_popen_factory(
+    ndjson_stream: str, returncode: int = 0
+):
+    """Create a factory for subprocess.Popen mock (returns MockPopen)."""
+    def factory(*args, **kwargs):
+        return MockPopen(ndjson_stream, returncode)
+    return factory
+
+
+def make_popen_dispatcher(
+    claude_ndjson: str | None = None,
+    claude_returncode: int = 0,
+    claude_side_effect: Exception | None = None,
+):
+    """Create a side_effect for subprocess.Popen mock.
+
+    Claude commands return MockPopen with NDJSON stream.
+    Non-Claude Popen calls (e.g. taskkill) return a no-op MockPopen.
+    """
+    def factory(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args", [])
+        if isinstance(cmd, list) and cmd and cmd[0] == "claude":
+            if claude_side_effect is not None:
+                raise claude_side_effect
+            return MockPopen(claude_ndjson or "", claude_returncode)
+        # taskkill or other subprocess.Popen calls
+        return MockPopen("", 0)
+    return factory

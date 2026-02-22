@@ -1,0 +1,12 @@
+.env
+.workflow/state.json
+.workflow/*.log
+.workflow/research_result*.md
+.workflow/metrics_summary*.json
+.workflow/trace*.jsonl
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+dist/
+build/

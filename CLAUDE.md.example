@@ -1,10 +1,10 @@
 # Global CLAUDE.md v3.0 — Compact
-# Austin Kidwell | Intellegix, ASR Inc | Patterns: ~/.claude/patterns/
+# <Your Name> | <Your Org> | Patterns: ~/.claude/patterns/
 
 ## Identity
-- Austin Kidwell | CEO, Full-stack Dev, Systems Architect
-- Intellegix (Construction BI SaaS), ASR Inc (Systems Integration)
-- San Diego, CA | Pacific (PT)
+- <Your Name> | <Role>
+- <Organization> (<Description>)
+- <City, State> | <Timezone>
 
 ## Tech Stack
 - Python (70%), TypeScript (25%), Kotlin (5%)
@@ -98,19 +98,16 @@ Respect the project's "DO NOT" list. Phase restrictions are hard limits, not sug
 
 ## Add-ons
 
-**CONSTRUCTION_BI** (Intellegix/ASR): Procore (3600 req/hr)/QB/Foundation/Raken | WIP, Job Costing, Change Orders, Retention 5-10%, Certified Payroll | margin=(rev-cost)/rev, WIP=earned_rev-billed | SD fire mitigation, SB721, Trex
+<!-- Add-ons are domain-specific context modules you can activate per-project.
+     Each add-on provides Claude with industry knowledge, API patterns, and
+     domain-specific rules. Copy relevant add-ons to your project's CLAUDE.md. -->
 
-**MULTI_AGENT** (Claude Orchestration, Code Max CLI, AI TV 2.0): Orchestrator(Opus)→Research/Backend/Frontend/Test(Sonnet) | Agent types: Orchestrator, Research, Architect, Frontend, Backend, Database, DevOps, Testing | Handoff: `.claude/handoffs/[timestamp]-[task].md`
+**MULTI_AGENT** (Claude Orchestration): Orchestrator(Opus)->Research/Backend/Frontend/Test(Sonnet) | Agent types: Orchestrator, Research, Architect, Frontend, Backend, Database, DevOps, Testing | Handoff: `.claude/handoffs/[timestamp]-[task].md`
 
-**FINANCIAL_AUTOMATION** (Stocks CLI, Certified Payroll, Stock Manager): yfinance/Alpha Vantage/Finnhub/Foundation/Raken | pandas, openpyxl, PyPDF2, yagmail | Commodities: Lumber, Steel, Copper, Oil, USD Index
+**MCP_BROWSER_AUTOMATION** (Browser Extension, MCP Protocol): MCP Server<->WS Bridge<->Chrome Ext<->DOM | <2.2s exec, 40% productivity boost, 80% test reduction | See `patterns/MCP_PATTERNS.md`, `patterns/BROWSER_AUTOMATION_PATTERNS.md`, `patterns/SECURITY_MCP.md` | Full plan: `~/.claude/plans/mcp-master-plan.md`
 
-**WEB_SCRAPING** (Pricing scraper, App monitoring): undetected-chromedriver, mobile emulation, BOPIS | Price validation: range check, keyword match, 95% confidence | Claude 3.5 Sonnet for screenshot price extraction
-
-**HARDWARE_IOT** (Voice Controller, Remote Mobile UI): GPIO (onoff), Vosk offline speech, Roku ECP | pyautogui (Win), xdotool (Linux) | **Remote Mobile UI server is a long-running intentional process — DO NOT kill it as stale**
-
-**ANDROID_MOBILE** (IntelleGolf, Intellegix Attack, Perplexity Voice): Kotlin, Coroutines, Compose UI, Hilt DI | Min SDK 26, target latest
-
-**MCP_BROWSER_AUTOMATION** (Browser Extension, Enterprise Test, MCP Protocol): MCP Server↔WS Bridge↔Chrome Ext↔DOM | <2.2s exec, 40% productivity boost, 80% test reduction | See `patterns/MCP_PATTERNS.md`, `patterns/BROWSER_AUTOMATION_PATTERNS.md`, `patterns/SECURITY_MCP.md` | Full plan: `~/.claude/plans/mcp-master-plan.md`
+<!-- Add your own domain add-ons here. Format:
+     **ADDON_NAME** (Projects): key tools/APIs | domain concepts | constraints -->
 
 ## Hooks
 Auto-format on save: Python (`black`+`isort`), TS/JS (`eslint --fix`), JSON/YAML/MD (`prettier --write`). Configure in `~/.claude/settings.json`.
@@ -122,6 +119,6 @@ TS: `rm -rf node_modules/.cache && npm run build`
 DB: `psql $DATABASE_URL -c "SELECT 1"` | Integrations: check OAuth expiry, rate limits, webhook delivery
 
 ## API Keys (Global)
-Source: `C:\Users\AustinKidwell\ASR Dropbox\Austin Kidwell\02.02_ApiKeys\`
-Load from environment variables. See source directory for values.
-Keys: AWS (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`), Claude (`ANTHROPIC_API_KEY`), HeyGen (`HEYGEN_API_KEY`), OpenAI (`OPENAI_API_KEY`), Perplexity (`PERPLEXITY_API_KEY`), Render (`RENDER_API_KEY`), GitHub (use `gh auth login`)
+Source: Environment variables (see `.env.example` for required keys)
+Load from environment variables — never hardcode.
+Keys: Claude (`ANTHROPIC_API_KEY`), Perplexity (`PERPLEXITY_API_KEY`), GitHub (use `gh auth login`)

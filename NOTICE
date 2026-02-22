@@ -1,0 +1,33 @@
+NOTICE — claude-config
+Copyright 2025-2026 Austin Kidwell
+
+Trademark Disclaimer
+--------------------
+"Claude" is a trademark of Anthropic, PBC. This project is not affiliated
+with, endorsed by, or sponsored by Anthropic. Use of the name "Claude" in
+this repository is purely for descriptive purposes (nominative fair use) to
+indicate compatibility with the Claude Code CLI tool.
+
+Third-Party Services
+--------------------
+This project integrates with the following third-party services. Users must
+comply with the respective terms of service:
+
+- Anthropic Claude API: https://www.anthropic.com/legal/commercial-terms
+- Perplexity AI: https://www.perplexity.ai/hub/legal
+- Chrome Extension APIs: https://developer.chrome.com/docs/extensions/develop/migrate/what-is-mv3
+
+Security Notice
+---------------
+Never commit API keys, tokens, or credentials to this repository. All
+sensitive values must be loaded from environment variables. See .env.example
+files in each component for required keys.
+
+Session files (e.g., playwright-session.json) contain authentication cookies
+and must never be committed. The .gitignore is configured to exclude these,
+but always verify before pushing.
+
+License
+-------
+This project is licensed under the MIT License. See the LICENSE file for
+the full license text.
