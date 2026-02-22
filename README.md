@@ -218,6 +218,66 @@ pytest tests/ -v
 - Stagnation detection with two-strike system
 - Budget enforcement per-iteration and cumulative
 
+### Supervising the Automation Loop
+
+The loop driver is autonomous, but the **human operator remains in control**. Claude Code is your control plane — you launch the loop, monitor its progress, and steer the project between runs.
+
+#### Launching & Managing
+
+Run `loop_driver.py` from a Claude Code session or a separate terminal. The loop spawns Claude Code CLI as a worker:
+
+```
+claude -p "<prompt>" --output-format stream-json --dangerously-skip-permissions --resume <sessionId>
+```
+
+Each iteration streams NDJSON events (`init`, `assistant`, `result`, `system`). The driver extracts cost, turns, and completion markers automatically.
+
+#### Auditing Progress
+
+The loop writes state to `<project>/.workflow/`:
+
+| File | Purpose |
+|------|---------|
+| `state.json` | Full cycle history — iteration count, cost per cycle, turns, session IDs |
+| `trace.jsonl` | Append-only event log (loop_start, claude_invoke, claude_complete, research_start, timeout_detected, model_fallback, stagnation_exit, etc.) |
+| `metrics_summary.json` | Written on every exit — total cost, iterations, turns, error count |
+| `research_result.md` | Latest Perplexity research response |
+
+Review these between runs (or during, via `tail -f trace.jsonl`) to decide whether the loop is making progress.
+
+#### Deciding When to Stop
+
+The loop exits automatically on:
+- `PROJECT_COMPLETE` marker in output → exit 0
+- Max iterations reached → exit 1
+- Budget exceeded → exit 2
+- Stagnation detected → exit 3
+
+Between runs, read the loop's output and `state.json` to audit what was accomplished. If more phases remain, restart the loop. If the work needs course correction, revise `CLAUDE.md` first.
+
+#### Revising the Blueprint (CLAUDE.md)
+
+The loop's default prompt instructs Claude to "Read CLAUDE.md first" — it's the project's source of truth for what to build. The operator edits `CLAUDE.md` between loop runs to add/remove/reorder phases, update status markers, or change priorities.
+
+The loop never modifies `CLAUDE.md` itself — the human retains full editorial control. This is how you steer multi-session projects: update `CLAUDE.md`, restart the loop.
+
+#### Known Limitations
+
+**Concurrent Perplexity Research Queries**
+
+When running multiple loop instances that each trigger Perplexity research, only one query typically succeeds. Each research query launches a headful Chromium instance using the same Perplexity session cookies (`~/.claude/config/playwright-session.json`). Perplexity's web UI is designed for single-user interaction — concurrent browsers presenting the same session get errors or incomplete results. The toolkit includes a `SessionSemaphore` (max 3 concurrent browser slots), but Perplexity's own session handling means concurrent queries from the same account rarely all succeed.
+
+**Workaround**: Run research-heavy loops sequentially, or stagger start times so research phases don't overlap.
+
+**Research Query Retries**
+
+Failed research queries automatically retry up to **3 times** with exponential backoff:
+- Delay schedule: ~1s → ~2s → ~4s (base 1.0s × 2^attempt, with random jitter ±50%, capped at 30s)
+- Retryable errors: timeouts, Playwright errors, parse failures
+- A **circuit breaker** trips after 5 consecutive failures, pausing research for 120s before allowing retries
+
+Transient Perplexity/Cloudflare issues are handled automatically — the loop continues even if research fails.
+
 ### Custom Slash Commands
 
 Place in `~/.claude/commands/` and invoke from Claude Code with `/<command-name>`.
