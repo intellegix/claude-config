@@ -52,11 +52,17 @@ A modular configuration system for Claude Code CLI. Includes an automated loop d
 │   ├── council_config.py      # Council configuration
 │   ├── council_query.py       # Query orchestration
 │   ├── session_context.py     # Session/cookie management
+│   ├── refresh_session.py     # Session cookie refresh script
 │   └── synthesis_prompt.md    # Opus synthesis prompt template
 │
 ├── mcp-servers/
 │   └── browser-bridge/        # MCP Browser Bridge server
 │       ├── server.js           # MCP protocol handler
+│       ├── extension/          # Chrome extension (load unpacked)
+│       │   ├── manifest.json   # MV3 manifest
+│       │   ├── background.js   # Service worker + WebSocket client
+│       │   ├── content.js      # DOM interaction helpers
+│       │   └── popup.html      # Connection status popup
 │       ├── lib/                # Server modules
 │       │   ├── websocket-bridge.js
 │       │   ├── context-manager.js
@@ -141,6 +147,47 @@ python loop_driver.py --project /path/to/your/project --max-iterations 10 --verb
 python loop_driver.py --project /path/to/project --model opus --timeout 600 --verbose
 ```
 
+## Perplexity Setup
+
+Council, research, and labs features use Perplexity browser automation. Setup is required before first use.
+
+### Requirements
+
+| Feature | Subscription |
+|---------|-------------|
+| `/council` (multi-model) | Perplexity **Max** |
+| `/research` (deep research) | Perplexity Pro or Max |
+| `/labs` (experimental) | Perplexity Pro or Max |
+
+### Step 1: Create Perplexity Custom Shortcuts
+
+The toolkit types `/council`, `/research`, and `/labs` into Perplexity's input to activate modes. These must exist as Perplexity shortcuts:
+
+1. Go to [perplexity.ai/settings](https://perplexity.ai/settings) > Shortcuts
+2. Create three custom shortcuts:
+   - **`/council`** — Activates Model Council (queries 3 models simultaneously)
+   - **`/research`** — Activates Deep Research mode
+   - **`/labs`** — Activates Labs (experimental) mode
+
+### Step 2: Cache Session Cookies
+
+The toolkit uses your browser login session — no Perplexity API key needed ($0/query).
+
+1. Install the **MCP Browser Bridge** Chrome extension included in this repo:
+   - Open `chrome://extensions` → enable **Developer mode** → **Load unpacked** → select `~/.claude/mcp-servers/browser-bridge/extension/`
+   - See [MCP Browser Bridge](#mcp-browser-bridge) below for full setup (server + Claude Code config)
+   - *Note: Anthropic's official "Claude in Chrome" extension is still in beta and has [known Bun runtime issues on Windows](https://github.com/anthropics/claude-code/issues/24034) that prevent the native host from connecting. The team is actively working on fixes. This toolkit uses its own extension to avoid those issues.*
+2. Log into [perplexity.ai](https://perplexity.ai) in Chrome
+3. From Claude Code, run: `/cache-perplexity-session`
+4. Session saves to `~/.claude/config/perplexity-session.json` (24h TTL)
+
+**Refresh expired sessions:**
+```bash
+cd ~/.claude/council-automation
+python refresh_session.py            # headful refresh (~6s)
+python refresh_session.py --validate # refresh + test query
+```
+
 ## Components
 
 ### Automated Loop Driver
@@ -203,15 +250,37 @@ python council_browser.py --headful --perplexity-mode research "your query here"
 
 ### MCP Browser Bridge
 
-WebSocket-based bridge between Claude Code CLI and Chrome browser extension.
+WebSocket bridge between Claude Code CLI and Chrome. Both the server and extension are required.
+
+#### Chrome Extension
+
+1. Open `chrome://extensions` in Chrome
+2. Enable **Developer mode** (top-right toggle)
+3. Click **Load unpacked** → select `~/.claude/mcp-servers/browser-bridge/extension/`
+4. Pin the extension — popup shows connection status (green = connected)
+
+#### MCP Server
 
 ```bash
-# Start the MCP server
 cd ~/.claude/mcp-servers/browser-bridge
+npm install  # first time only
 npm start
+```
 
-# Configure in Claude Code settings as an MCP server
-# See server.js for tool definitions
+The extension auto-connects to `ws://127.0.0.1:8765`.
+
+#### Claude Code Configuration
+
+Add to your MCP settings (`~/.claude/settings.json` or project `.mcp.json`):
+```json
+{
+  "mcpServers": {
+    "browser-bridge": {
+      "command": "node",
+      "args": ["~/.claude/mcp-servers/browser-bridge/server.js"]
+    }
+  }
+}
 ```
 
 ### Portfolio Governance

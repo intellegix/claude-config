@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Claude Sessions Active</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      width: 380px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      padding: 20px;
+    }
+    h1 {
+      font-size: 15px;
+      font-weight: 600;
+      color: #fff;
+      margin-bottom: 6px;
+    }
+    .subtitle {
+      font-size: 12px;
+      color: #888;
+      margin-bottom: 16px;
+      line-height: 1.4;
+    }
+    .session-list {
+      list-style: none;
+      margin-bottom: 16px;
+    }
+    .session-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      background: #16213e;
+      border-radius: 6px;
+      margin-bottom: 6px;
+      font-size: 13px;
+    }
+    .session-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #00e676;
+      box-shadow: 0 0 6px #00e676;
+      flex-shrink: 0;
+    }
+    .session-label { flex: 1; }
+    .session-tabs {
+      font-size: 11px;
+      color: #888;
+    }
+    .empty {
+      font-size: 12px;
+      color: #666;
+      font-style: italic;
+      padding: 8px 12px;
+    }
+    button {
+      width: 100%;
+      padding: 10px;
+      border: none;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      background: #ff5252;
+      color: #fff;
+      transition: opacity 0.2s;
+    }
+    button:hover { opacity: 0.85; }
+    button:active { opacity: 0.7; }
+  </style>
+</head>
+<body>
+  <h1>Claude Sessions Active</h1>
+  <p class="subtitle">Chrome stayed open because Claude Code has active browser sessions. Close this window to let Chrome exit.</p>
+  <ul id="sessions" class="session-list">
+    <li class="empty">Loading...</li>
+  </ul>
+  <button id="closeBtn">Close Chrome</button>
+  <script src="keepalive.js"></script>
+</body>
+</html>

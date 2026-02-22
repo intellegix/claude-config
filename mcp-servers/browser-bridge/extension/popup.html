@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      width: 340px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      padding: 16px;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    .header h1 {
+      font-size: 14px;
+      font-weight: 600;
+      color: #fff;
+    }
+    .header .version {
+      font-size: 11px;
+      color: #666;
+      font-family: monospace;
+    }
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 12px;
+      background: #16213e;
+      border-radius: 8px;
+      margin-bottom: 10px;
+    }
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .dot.connected { background: #00e676; box-shadow: 0 0 6px #00e676; }
+    .dot.disconnected { background: #ff5252; box-shadow: 0 0 6px #ff5252; }
+    .status-text {
+      font-size: 13px;
+      flex: 1;
+    }
+    .client-id {
+      font-size: 10px;
+      color: #888;
+      font-family: monospace;
+      margin-top: 2px;
+    }
+    .section {
+      background: #16213e;
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-bottom: 10px;
+    }
+    .section-label {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      color: #7c4dff;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px 16px;
+    }
+    .metric-item {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+    }
+    .metric-item .label { color: #999; }
+    .metric-item .value { color: #e0e0e0; font-family: monospace; }
+    .metric-item .value.error { color: #ff5252; }
+    .tool-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 12px;
+      padding: 3px 0;
+      border-bottom: 1px solid #1a1a2e;
+    }
+    .tool-row:last-child { border-bottom: none; }
+    .tool-name {
+      color: #ccc;
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .tool-calls {
+      color: #999;
+      font-family: monospace;
+      min-width: 32px;
+      text-align: right;
+      margin: 0 8px;
+    }
+    .tool-avg {
+      color: #888;
+      font-family: monospace;
+      min-width: 52px;
+      text-align: right;
+    }
+    .sessions-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      margin-bottom: 4px;
+    }
+    .sessions-row .label { color: #999; }
+    .sessions-row .value { color: #e0e0e0; font-family: monospace; }
+    .relay-detail {
+      font-size: 11px;
+      color: #888;
+      padding: 2px 0;
+    }
+    .btn-row {
+      display: flex;
+      gap: 8px;
+      margin-top: 2px;
+    }
+    button {
+      flex: 1;
+      padding: 8px 12px;
+      border: none;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+    button:hover { opacity: 0.85; }
+    button:active { opacity: 0.7; }
+    .btn-secondary {
+      background: #333;
+      color: #ccc;
+    }
+    .placeholder {
+      font-size: 11px;
+      color: #555;
+      font-style: italic;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Claude Browser Bridge</h1>
+    <span class="version">v1.2</span>
+  </div>
+
+  <div class="status-row">
+    <div id="statusDot" class="dot disconnected"></div>
+    <div>
+      <div id="statusText" class="status-text">Checking...</div>
+      <div id="clientId" class="client-id"></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-label">Metrics (1h)</div>
+    <div id="metricsContent" class="metrics-grid">
+      <div class="placeholder">Loading...</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-label">Top Tools</div>
+    <div id="topToolsContent">
+      <div class="placeholder">Loading...</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-label">Sessions</div>
+    <div id="sessionsContent">
+      <div class="placeholder">Loading...</div>
+    </div>
+  </div>
+
+  <div class="btn-row">
+    <button id="reconnectBtn" class="btn-secondary">Reconnect</button>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
