@@ -711,50 +711,38 @@ class PerplexityCouncil:
     async def submit_query(self, page, query: str) -> None:
         """Type and submit the query.
 
-        Uses native value setter for speed, but only when no slash command
-        mode is active. page.fill() and native setter clobber React's internal
-        mode flag, deactivating /research or /council. When a slash command
-        mode is active, falls back to keyboard.type() which preserves React state.
+        Mode activation (/research, /council, /labs) is already completed
+        before this method is called, so the mode is locked in. Native
+        setter (fast paste) is safe here — it sets the query text without
+        affecting the already-activated mode.
         """
         textarea = self.selectors.get("textarea", "#ask-input")
 
-        uses_slash_cmd = self.perplexity_mode in ("research", "labs", "council")
-
-        if not uses_slash_cmd:
-            # Fast path: native setter (no slash command to preserve)
-            try:
-                filled = await page.evaluate(
-                    """([sel, text]) => {
-                        const el = document.querySelector(sel);
-                        if (!el) return false;
-                        const proto = el.tagName === 'TEXTAREA'
-                            ? HTMLTextAreaElement.prototype
-                            : HTMLInputElement.prototype;
-                        const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-                        if (setter) {
-                            setter.call(el, text);
-                            el.dispatchEvent(new Event('input', { bubbles: true }));
-                            return true;
-                        }
-                        return false;
-                    }""",
-                    [textarea, query],
-                )
-                if not filled:
-                    raise ValueError("Native setter failed")
-                _log(f"Query set via native setter ({len(query)} chars)")
-            except Exception:
-                _log("Native setter unavailable, using page.fill()")
-                await page.fill(textarea, query)
-        else:
-            # Slash command active: keyboard.type() preserves React state
-            try:
-                await page.click(textarea)
-                await page.wait_for_timeout(300)
-            except Exception:
-                pass
-            await page.keyboard.type(query, delay=BROWSER_TYPE_DELAY)
-            _log(f"Query typed via keyboard ({len(query)} chars)")
+        # Try native setter first (preserves newlines), fall back to page.fill()
+        try:
+            filled = await page.evaluate(
+                """([sel, text]) => {
+                    const el = document.querySelector(sel);
+                    if (!el) return false;
+                    // Try textarea/input native setter (React-compatible)
+                    const proto = el.tagName === 'TEXTAREA'
+                        ? HTMLTextAreaElement.prototype
+                        : HTMLInputElement.prototype;
+                    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+                    if (setter) {
+                        setter.call(el, text);
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                        return true;
+                    }
+                    return false;
+                }""",
+                [textarea, query],
+            )
+            if not filled:
+                raise ValueError("Native setter failed")
+        except Exception:
+            _log("Native setter unavailable, using page.fill()")
+            await page.fill(textarea, query)
         await page.wait_for_timeout(500)
 
         # Submit via Enter
