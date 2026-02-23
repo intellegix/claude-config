@@ -42,6 +42,11 @@ from council_config import (
     BROWSER_DOM_CONFIRM_WAIT,
     BROWSER_TYPE_DELAY,
     BROWSER_USER_DATA_DIR,
+    BROWSER_STOP_BUTTON_POLL_MS,
+    BROWSER_STOP_BUTTON_DEBOUNCE_MS,
+    BROWSER_MIN_GENERATION_TIME_MS,
+    BROWSER_CONFIRMATION_WINDOW_MS,
+    BROWSER_MUTATION_STABILITY_MS,
     MAX_CONCURRENT_SESSIONS,
     SELECTORS_PATH,
     SEMAPHORE_TTL,
@@ -859,15 +864,250 @@ class PerplexityCouncil:
 
         return json.loads(text)
 
+    # --- Smart Completion Detection methods (Phase 1-2, 5) ---
+
+    async def _wait_for_stop_button_cycle(self, page, timeout: int, start: float) -> bool:
+        """Wait for stop button to appear then disappear (with debounce).
+
+        Returns True if the stop button completed a full cycle (appeared → disappeared).
+        Returns False if the stop button never appeared within 30s.
+        """
+        stop_selectors = (
+            'button[aria-label*="Stop"], button[aria-label*="Cancel"], '
+            '[data-testid*="stop"], button:has(svg circle[stroke-dasharray]), '
+            'button[class*="stop"]'
+        )
+        poll_s = BROWSER_STOP_BUTTON_POLL_MS / 1000
+        debounce_s = BROWSER_STOP_BUTTON_DEBOUNCE_MS / 1000
+
+        # Phase 1: Wait for stop button to appear (confirms generation started)
+        _log("Smart: waiting for stop button to appear...")
+        appear_deadline = start + 30  # 30s to detect stop button
+        appeared = False
+        while time.time() < appear_deadline and (time.time() - start) * 1000 < timeout:
+            try:
+                has_stop = await page.evaluate(f"""() => {{
+                    return !!document.querySelector('{stop_selectors}');
+                }}""")
+                if has_stop:
+                    appeared = True
+                    _log(f"Smart: stop button appeared ({time.time() - start:.1f}s)")
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(poll_s)
+
+        if not appeared:
+            _log("Smart: stop button never appeared (30s), falling back")
+            return False
+
+        # Phase 2: Wait for stop button to disappear
+        _log("Smart: waiting for stop button to disappear...")
+        while (time.time() - start) * 1000 < timeout:
+            try:
+                has_stop = await page.evaluate(f"""() => {{
+                    return !!document.querySelector('{stop_selectors}');
+                }}""")
+                if not has_stop:
+                    _log(f"Smart: stop button disappeared ({time.time() - start:.1f}s), debouncing {debounce_s}s...")
+                    # Debounce: re-check after delay to handle inter-section flickers
+                    await asyncio.sleep(debounce_s)
+                    try:
+                        reappeared = await page.evaluate(f"""() => {{
+                            return !!document.querySelector('{stop_selectors}');
+                        }}""")
+                    except Exception:
+                        reappeared = False
+                    if reappeared:
+                        _log("Smart: stop button reappeared during debounce, re-entering wait loop")
+                        continue
+                    _log(f"Smart: stop button confirmed gone ({time.time() - start:.1f}s)")
+                    return True
+            except Exception:
+                pass
+            await asyncio.sleep(poll_s)
+
+        _log(f"Smart: timed out waiting for stop button to disappear ({time.time() - start:.1f}s)")
+        return False
+
+    async def _inject_mutation_observer(self, page) -> None:
+        """Inject a MutationObserver on the .prose content area.
+
+        Tracks window.__mutationState = { lastMutationTime, isStable, stableForMs }.
+        Stability = BROWSER_MUTATION_STABILITY_MS of zero mutations.
+        """
+        stability_ms = BROWSER_MUTATION_STABILITY_MS
+        await page.evaluate(f"""() => {{
+            window.__mutationState = {{
+                lastMutationTime: Date.now(),
+                isStable: false,
+                stableForMs: 0,
+            }};
+            const target = document.querySelector('.prose') ||
+                           document.querySelector('div.prose.max-w-none') ||
+                           document.body;
+            const observer = new MutationObserver((mutations) => {{
+                if (mutations.length > 0) {{
+                    window.__mutationState.lastMutationTime = Date.now();
+                    window.__mutationState.isStable = false;
+                    window.__mutationState.stableForMs = 0;
+                }}
+            }});
+            observer.observe(target, {{
+                childList: true,
+                characterData: true,
+                subtree: true,
+            }});
+            // Periodic stability check
+            setInterval(() => {{
+                const elapsed = Date.now() - window.__mutationState.lastMutationTime;
+                window.__mutationState.stableForMs = elapsed;
+                window.__mutationState.isStable = elapsed >= {stability_ms};
+            }}, 500);
+        }}""")
+        _log("Smart: MutationObserver injected on .prose content area")
+
+    async def _check_mutation_stability(self, page) -> bool:
+        """Check if the MutationObserver reports stable (no mutations for threshold)."""
+        try:
+            state = await page.evaluate("() => window.__mutationState || {}")
+            return bool(state.get("isStable", False))
+        except Exception:
+            return False
+
+    async def _check_for_error_state(self, page) -> bool:
+        """Check for error indicators after stop button disappears.
+
+        Returns True if an error was detected.
+        """
+        try:
+            error = await page.evaluate("""() => {
+                // Check for error text
+                const body = document.body.innerText || '';
+                const errorPatterns = [
+                    'Something went wrong',
+                    'Rate limit',
+                    'Error generating',
+                    'An error occurred',
+                    'Please try again',
+                ];
+                for (const pattern of errorPatterns) {
+                    if (body.includes(pattern)) return pattern;
+                }
+                // Check for error-styled elements
+                const errorEl = document.querySelector('[class*="error"]');
+                if (errorEl && errorEl.textContent.trim().length > 5) {
+                    return errorEl.textContent.trim().substring(0, 100);
+                }
+                return null;
+            }""")
+            if error:
+                _log(f"Smart: error state detected: {error}")
+                return True
+        except Exception:
+            pass
+        return False
+
+    async def _wait_research_smart(self, page, timeout: int, start: float) -> bool:
+        """Smart completion detection for research/labs modes.
+
+        Signal hierarchy:
+        1. Primary: stop button cycle (appeared → disappeared with debounce)
+        2. Confirming: MutationObserver stability OR text stability (10s window)
+        3. Fallback: existing _wait_research_fallback() with reduced guards
+
+        If the stop button disappears suspiciously fast (<30s), waits for
+        a confirming signal before accepting. If stop button never appears,
+        falls through to the CSS/text-stability fallback.
+        """
+        min_gen_s = BROWSER_MIN_GENERATION_TIME_MS / 1000
+        confirm_s = BROWSER_CONFIRMATION_WINDOW_MS / 1000
+        text_stable_s = 8  # seconds of unchanged text for confirmation
+
+        # Inject MutationObserver early
+        await self._inject_mutation_observer(page)
+
+        # Primary signal: stop button cycle
+        stop_cycle = await self._wait_for_stop_button_cycle(page, timeout, start)
+
+        if not stop_cycle:
+            # Stop button never appeared — fall through to existing fallback
+            _log("Smart: no stop button detected, using fallback completion detection")
+            return await self._wait_research_fallback(page, timeout, start)
+
+        elapsed = time.time() - start
+
+        # Check for error state after stop button disappears
+        if await self._check_for_error_state(page):
+            _log("Smart: error detected after stop button disappeared")
+            return False
+
+        # Suspiciously fast? Wait for confirming signal
+        if elapsed < min_gen_s:
+            _log(f"Smart: stop button gone at {elapsed:.1f}s (< {min_gen_s}s), waiting for confirmation...")
+            confirm_start = time.time()
+            text_snapshot = await self._get_text_length(page)
+            text_stable_since = time.time()
+
+            while (time.time() - confirm_start) < confirm_s:
+                # Check mutation stability
+                if await self._check_mutation_stability(page):
+                    _log(f"Smart: confirmed via MutationObserver stability ({time.time() - start:.1f}s)")
+                    return True
+                # Check text stability
+                current_len = await self._get_text_length(page)
+                if current_len != text_snapshot:
+                    text_snapshot = current_len
+                    text_stable_since = time.time()
+                elif (time.time() - text_stable_since) >= text_stable_s:
+                    _log(f"Smart: confirmed via text stability ({text_stable_s}s, {time.time() - start:.1f}s)")
+                    return True
+                await asyncio.sleep(1)
+
+            _log(f"Smart: no confirming signal in {confirm_s}s, falling back to CSS detection")
+            return await self._wait_research_fallback(page, timeout, start)
+
+        # Normal timing — brief confirmation phase (10s max)
+        _log(f"Smart: stop button gone at {elapsed:.1f}s, running brief confirmation...")
+        confirm_start = time.time()
+        text_snapshot = await self._get_text_length(page)
+        text_stable_since = time.time()
+
+        while (time.time() - confirm_start) < confirm_s:
+            # Check mutation stability
+            if await self._check_mutation_stability(page):
+                _log(f"Smart: confirmed via MutationObserver stability ({time.time() - start:.1f}s)")
+                return True
+            # Check text stability
+            current_len = await self._get_text_length(page)
+            if current_len != text_snapshot:
+                text_snapshot = current_len
+                text_stable_since = time.time()
+            elif (time.time() - text_stable_since) >= text_stable_s:
+                _log(f"Smart: confirmed via text stability ({text_stable_s}s, {time.time() - start:.1f}s)")
+                return True
+            await asyncio.sleep(1)
+
+        # Confirmation window expired but stop button is still gone — trust it
+        _log(f"Smart: confirmation window expired, trusting stop button signal ({time.time() - start:.1f}s)")
+        return True
+
     async def wait_for_completion(self, page, timeout: int | None = None) -> bool:
         """Wait for all model responses and synthesis to complete.
 
-        Primary: Vision-based detection via Haiku screenshot analysis.
+        Research/labs: Smart detection (stop button + multi-signal confirmation).
+        Council: Vision-based detection via Haiku screenshot analysis.
         Fallback: CSS selector + stability polling (when ANTHROPIC_API_KEY not set).
         """
         timeout = timeout or self.timeout
         start = time.time()
 
+        # Research/labs: always use smart detection (stop button + multi-signal)
+        # regardless of vision availability. Vision is deprecated for research/labs.
+        if self.perplexity_mode in ("research", "labs"):
+            return await self._wait_research_smart(page, timeout, start)
+
+        # Council mode: vision-based or CSS fallback
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         use_vision = bool(api_key) and VISION_ENABLED
 
@@ -875,9 +1115,6 @@ class PerplexityCouncil:
             return await self._wait_vision(page, timeout, start)
         else:
             _log("Vision monitoring unavailable (no ANTHROPIC_API_KEY), using CSS fallback")
-            # Route research/labs to dedicated fallback (mode-aware stability)
-            if self.perplexity_mode in ("research", "labs"):
-                return await self._wait_research_fallback(page, timeout, start)
             return await self._wait_css_fallback(page, timeout, start)
 
     async def _wait_vision(self, page, timeout: int, start: float) -> bool:
@@ -887,9 +1124,8 @@ class PerplexityCouncil:
         Requires seeing 'synthesizing' before trusting 'complete', and
         requires 2 consecutive 'complete' polls for confidence.
         """
-        # Route research/labs to dedicated vision method (different prompt)
-        if self.perplexity_mode in ("research", "labs"):
-            return await self._wait_vision_research(page, timeout, start)
+        # Note: research/labs now use _wait_research_smart() (routed in wait_for_completion)
+        # This method is only called for council mode.
 
         poll_interval = VISION_POLL_INTERVAL_MODELS
         all_models_done = False

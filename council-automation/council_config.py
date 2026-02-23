@@ -99,17 +99,24 @@ BROWSER_POLL_INTERVAL = 2_000  # ms, check interval
 # Mode-aware stability thresholds (research/labs pause 60-120s+ between sections)
 # These must be LONGER than the longest Perplexity "thinking" pause to avoid
 # declaring completion during an inter-section pause.
-BROWSER_STABLE_MS_RESEARCH = 240_000  # ms, 4 min — research thinking pauses can be 60-120s (2x safety margin)
-BROWSER_STABLE_MS_LABS = 300_000      # ms, 5 min — labs can pause even longer (2x safety margin)
+BROWSER_STABLE_MS_RESEARCH = 120_000  # ms, 2 min — fallback only (smart detection is primary)
+BROWSER_STABLE_MS_LABS = 150_000      # ms, 2.5 min — fallback only (smart detection is primary)
 BROWSER_POLL_INTERVAL_RESEARCH = 3_000  # ms, slightly slower polling for long responses
 
 # DOM signal guards — prevent premature completion detection
 # Perplexity shows sources/action buttons mid-generation; don't trust DOM signals early
-BROWSER_DOM_MIN_ELAPSED_RESEARCH = 240_000  # ms, ignore DOM/vision signals for first 4 min (2x safety margin)
-BROWSER_DOM_MIN_ELAPSED_LABS = 360_000      # ms, ignore DOM/vision signals for first 6 min (2x safety margin)
+BROWSER_DOM_MIN_ELAPSED_RESEARCH = 120_000  # ms, fallback only (smart detection is primary)
+BROWSER_DOM_MIN_ELAPSED_LABS = 180_000      # ms, fallback only (smart detection is primary)
 BROWSER_DOM_MIN_TEXT_LENGTH = 3000          # chars, research reports are 5000+ when complete
 BROWSER_DOM_CONFIRM_WAIT = 30_000           # ms, polling window with 5s growth checks (must exceed longest inter-section pause)
 BROWSER_TYPE_DELAY = 30  # ms between keystrokes
+
+# --- Smart completion detection (stop button + multi-signal) ---
+BROWSER_STOP_BUTTON_POLL_MS = 1_000       # ms, polling interval for stop button check
+BROWSER_STOP_BUTTON_DEBOUNCE_MS = 3_000   # ms, re-check after disappearance
+BROWSER_MIN_GENERATION_TIME_MS = 30_000   # ms, minimum before accepting stop button signal
+BROWSER_CONFIRMATION_WINDOW_MS = 10_000   # ms, wait for confirming signal after primary
+BROWSER_MUTATION_STABILITY_MS = 5_000     # ms, zero mutations = stable
 BROWSER_USER_DATA_DIR = Path.home() / ".claude" / "config" / "playwright-chrome-profile"
 BROWSER_SESSION_PATH = Path.home() / ".claude" / "config" / "playwright-session.json"
 SELECTORS_PATH = Path.home() / ".claude" / "perplexity-selectors.json"
