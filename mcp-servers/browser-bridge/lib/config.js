@@ -33,7 +33,7 @@ export const CONFIG = {
     fullPage: 120_000,         // screenshot_full_page
     councilApi: 150_000,       // council_query --mode api
     councilBrowser: 210_000,   // council_query --mode browser
-    councilResearch: 420_000,  // research_query (7 min)
+    councilResearch: 540_000,  // research_query (9 min — Perplexity can take up to 7 min)
     councilLabs: 900_000,      // labs_query (15 min)
   },
 
