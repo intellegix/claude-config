@@ -315,9 +315,9 @@ class TestRetryAndCircuitBreaker:
     def test_non_retryable_fails_immediately(
         self, mock_run: MagicMock, research_project_dir: Path, fast_retry_config: RetryConfig
     ) -> None:
-        """Non-retryable errors (PARSE_ERROR) fail immediately without retry."""
+        """Non-retryable errors (SCRIPT_NOT_FOUND) fail immediately without retry."""
         mock_run.side_effect = make_research_dispatcher(
-            playwright_result=MagicMock(returncode=0, stdout="not json {{{", stderr="")
+            playwright_side_effect=FileNotFoundError("council_browser.py not found")
         )
 
         bridge = ResearchBridge(
@@ -326,7 +326,7 @@ class TestRetryAndCircuitBreaker:
         result = bridge.query()
 
         assert not result.success
-        assert result.error_code == "PARSE_ERROR"
+        assert result.error_code == "SCRIPT_NOT_FOUND"
         council_calls = [
             c for c in mock_run.call_args_list
             if c[0] and isinstance(c[0][0], list) and c[0][0][0] != "git"

@@ -106,7 +106,7 @@ class SessionContext:
 
 
 # Error codes that are transient and worth retrying
-RETRYABLE_ERRORS = {"TIMEOUT", "PLAYWRIGHT_ERROR"}
+RETRYABLE_ERRORS = {"TIMEOUT", "PLAYWRIGHT_ERROR", "PARSE_ERROR"}
 
 
 class ResearchBridge:
