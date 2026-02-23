@@ -243,6 +243,19 @@ class LoopDriver:
             )
             self.tracker.save()
 
+            # Session rotation check (proactive context refresh)
+            should_rotate, rotate_reason = self._should_rotate_session(session_id)
+            if should_rotate:
+                logger.info("Session rotation: %s", rotate_reason)
+                self._write_trace_event(
+                    "session_rotation",
+                    reason=rotate_reason,
+                    session_turns=self.tracker.get_session_turns(session_id),
+                    session_cost=self.tracker.get_session_cost(session_id),
+                )
+                self.tracker.clear_session()
+                session_id = None
+
             # Budget check
             budget_check = self.tracker.check_budget(
                 per_iteration_limit=self.config.limits.max_per_iteration_budget_usd,
@@ -685,6 +698,51 @@ class LoopDriver:
             is_error=False,
         )
         return parsed
+
+    def _should_rotate_session(self, session_id: Optional[str]) -> tuple[bool, str]:
+        """Check if the current session should be rotated for fresh context.
+
+        Returns (should_rotate, reason). Checks:
+        1. Hard turn limit per session
+        2. Hard cost limit per session
+        3. Behavioral: recent low-productivity iterations suggest context exhaustion
+        """
+        cfg = self.config.stagnation
+        if not cfg.enabled or not session_id:
+            return False, ""
+
+        # Check 1: Hard turn limit
+        session_turns = self.tracker.get_session_turns(session_id)
+        if session_turns >= cfg.session_max_turns:
+            return True, (
+                f"Session turn limit reached: {session_turns} >= {cfg.session_max_turns}"
+            )
+
+        # Check 2: Hard cost limit
+        session_cost = self.tracker.get_session_cost(session_id)
+        if session_cost >= cfg.session_max_cost_usd:
+            return True, (
+                f"Session cost limit reached: ${session_cost:.2f} >= ${cfg.session_max_cost_usd:.2f}"
+            )
+
+        # Check 3: Behavioral — context exhaustion detection
+        cycles = self.tracker.state.cycles
+        if len(cycles) >= cfg.context_exhaustion_window:
+            window = cycles[-cfg.context_exhaustion_window:]
+            low_count = sum(
+                1 for c in window
+                if c.num_turns < cfg.context_exhaustion_turn_threshold
+                and c.session_id == session_id
+            )
+            # Require majority of window to be low-productivity
+            threshold = cfg.context_exhaustion_window - 1  # e.g., 2 of 3
+            if low_count >= threshold:
+                return True, (
+                    f"Context exhaustion: {low_count}/{cfg.context_exhaustion_window} "
+                    f"recent iterations below {cfg.context_exhaustion_turn_threshold} turns"
+                )
+
+        return False, ""
 
     def _check_stagnation(self) -> Result:
         """Detect diminishing returns from recent cycle history.

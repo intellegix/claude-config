@@ -135,6 +135,22 @@ class StagnationConfig(BaseModel):
         default={"opus": 3},
         description="Per-model override for max_consecutive_timeouts",
     )
+    session_max_turns: int = Field(
+        default=200, ge=10,
+        description="Hard turn limit per session before rotation",
+    )
+    session_max_cost_usd: float = Field(
+        default=20.0, gt=0,
+        description="Hard cost limit per session before rotation",
+    )
+    context_exhaustion_turn_threshold: int = Field(
+        default=5, ge=1,
+        description="Turns below this count as low-productivity for rotation detection",
+    )
+    context_exhaustion_window: int = Field(
+        default=3, ge=2, le=10,
+        description="Window size for behavioral context exhaustion detection",
+    )
 
 
 class WorkflowConfig(BaseModel):

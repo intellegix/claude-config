@@ -194,3 +194,23 @@ class StateTracker:
     def get_metrics(self) -> WorkflowMetrics:
         """Return current aggregated metrics."""
         return self.state.metrics
+
+    def get_session_turns(self, session_id: Optional[str] = None) -> int:
+        """Sum num_turns for all cycles matching the given session_id.
+
+        Defaults to last_session_id if no session_id is provided.
+        """
+        target = session_id or self.state.last_session_id
+        if not target:
+            return 0
+        return sum(c.num_turns for c in self.state.cycles if c.session_id == target)
+
+    def get_session_cost(self, session_id: Optional[str] = None) -> float:
+        """Sum cost_usd for all cycles matching the given session_id.
+
+        Defaults to last_session_id if no session_id is provided.
+        """
+        target = session_id or self.state.last_session_id
+        if not target:
+            return 0.0
+        return sum(c.cost_usd for c in self.state.cycles if c.session_id == target)

@@ -1221,6 +1221,211 @@ class TestModelFallback:
         assert len(fallback_events) == 1
 
 
+class TestSessionRotation:
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_session_rotation_at_turn_limit(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """Session rotates when cumulative turns reach the limit."""
+        config.limits.max_iterations = 3
+        config.stagnation.session_max_turns = 20  # Low limit for testing
+        config.stagnation.session_max_cost_usd = 999.0  # Won't trigger
+
+        mock_popen.side_effect = make_popen_dispatcher(
+            claude_ndjson=build_ndjson_stream("s1", 0.01, 15, "Working..."),
+        )
+        mock_run.side_effect = make_subprocess_dispatcher(
+            research_result=mock_playwright_result(),
+        )
+
+        driver = LoopDriver(project_dir, config)
+        exit_code = driver.run()
+        assert exit_code == EXIT_MAX_ITERATIONS
+
+        # Verify rotation trace event
+        trace_path = project_dir / ".workflow" / "trace.jsonl"
+        events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").strip().splitlines()]
+        rotation_events = [e for e in events if e["event_type"] == "session_rotation"]
+        assert len(rotation_events) >= 1
+        assert "turn limit" in rotation_events[0]["reason"].lower()
+
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_session_rotation_at_cost_limit(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """Session rotates when cumulative cost reaches the limit."""
+        config.limits.max_iterations = 3
+        config.limits.max_total_budget_usd = 100.0  # High total so we don't exit on budget
+        config.limits.max_per_iteration_budget_usd = 50.0
+        config.stagnation.session_max_turns = 9999  # Won't trigger
+        config.stagnation.session_max_cost_usd = 1.0  # Low limit for testing
+
+        mock_popen.side_effect = make_popen_dispatcher(
+            claude_ndjson=build_ndjson_stream("s1", 0.80, 10, "Working..."),
+        )
+        mock_run.side_effect = make_subprocess_dispatcher(
+            research_result=mock_playwright_result(),
+        )
+
+        driver = LoopDriver(project_dir, config)
+        exit_code = driver.run()
+        assert exit_code == EXIT_MAX_ITERATIONS
+
+        # Verify rotation trace event
+        trace_path = project_dir / ".workflow" / "trace.jsonl"
+        events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").strip().splitlines()]
+        rotation_events = [e for e in events if e["event_type"] == "session_rotation"]
+        assert len(rotation_events) >= 1
+        assert "cost limit" in rotation_events[0]["reason"].lower()
+
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_context_exhaustion_triggers_rotation(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """Behavioral detection: 2/3 low-turn iterations trigger rotation."""
+        config.limits.max_iterations = 5
+        config.stagnation.session_max_turns = 9999  # Won't trigger
+        config.stagnation.session_max_cost_usd = 999.0  # Won't trigger
+        config.stagnation.context_exhaustion_turn_threshold = 5
+        config.stagnation.context_exhaustion_window = 3
+        # Disable regular stagnation so it doesn't interfere
+        config.stagnation.low_turn_threshold = 0
+
+        call_count = [0]
+
+        def popen_side_effect(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get("args", [])
+            if isinstance(cmd, list) and cmd and cmd[0] == "claude":
+                call_count[0] += 1
+                # All iterations with 3 turns (below threshold of 5)
+                return MockPopen(
+                    build_ndjson_stream(f"s1", 0.05, 3, "Working...")
+                )
+            return MockPopen("")  # taskkill
+
+        mock_popen.side_effect = popen_side_effect
+        mock_run.side_effect = make_subprocess_dispatcher(
+            research_result=mock_playwright_result(),
+        )
+
+        driver = LoopDriver(project_dir, config)
+        exit_code = driver.run()
+        assert exit_code == EXIT_MAX_ITERATIONS
+
+        # Verify rotation trace event
+        trace_path = project_dir / ".workflow" / "trace.jsonl"
+        events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").strip().splitlines()]
+        rotation_events = [e for e in events if e["event_type"] == "session_rotation"]
+        assert len(rotation_events) >= 1
+        assert "context exhaustion" in rotation_events[0]["reason"].lower()
+
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_rotation_continues_loop(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """After rotation, loop continues (doesn't exit)."""
+        config.limits.max_iterations = 4
+        config.stagnation.session_max_turns = 10  # Will trigger after iter 1
+        config.stagnation.session_max_cost_usd = 999.0
+
+        call_count = [0]
+
+        def popen_side_effect(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get("args", [])
+            if isinstance(cmd, list) and cmd and cmd[0] == "claude":
+                call_count[0] += 1
+                sid = f"s{call_count[0]}"
+                return MockPopen(build_ndjson_stream(sid, 0.05, 15, "Working..."))
+            return MockPopen("")
+
+        def run_side_effect(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get("args", [])
+            if isinstance(cmd, list) and cmd:
+                if cmd[0] == "git":
+                    return mock_git_log_result()
+                if "council_browser" in str(cmd):
+                    return mock_playwright_result()
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        mock_popen.side_effect = popen_side_effect
+        mock_run.side_effect = run_side_effect
+
+        driver = LoopDriver(project_dir, config)
+        exit_code = driver.run()
+        # Should hit max iterations, NOT stagnation
+        assert exit_code == EXIT_MAX_ITERATIONS
+        # Multiple Claude calls means loop continued
+        claude_calls = [
+            c for c in mock_popen.call_args_list
+            if c[0] and isinstance(c[0][0], list) and c[0][0] and c[0][0][0] == "claude"
+        ]
+        assert len(claude_calls) == 4
+
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_rotation_does_not_set_stagnation_flag(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """Session rotation doesn't count as a stagnation strike."""
+        config.limits.max_iterations = 4
+        config.stagnation.session_max_turns = 10  # Triggers rotation
+        config.stagnation.session_max_cost_usd = 999.0
+
+        call_count = [0]
+
+        def popen_side_effect(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get("args", [])
+            if isinstance(cmd, list) and cmd and cmd[0] == "claude":
+                call_count[0] += 1
+                sid = f"s{call_count[0]}"
+                return MockPopen(build_ndjson_stream(sid, 0.05, 15, "Working..."))
+            return MockPopen("")
+
+        def run_side_effect(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get("args", [])
+            if isinstance(cmd, list) and cmd:
+                if cmd[0] == "git":
+                    return mock_git_log_result()
+                if "council_browser" in str(cmd):
+                    return mock_playwright_result()
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        mock_popen.side_effect = popen_side_effect
+        mock_run.side_effect = run_side_effect
+
+        driver = LoopDriver(project_dir, config)
+        driver.run()
+
+        # Rotation should NOT have set the stagnation reset flag
+        assert driver._stagnation_reset_done is False
+
+    def test_should_rotate_disabled(
+        self, project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """Rotation returns False when stagnation is disabled."""
+        config.stagnation.enabled = False
+        driver = LoopDriver(project_dir, config, dry_run=True, skip_preflight=True)
+        should, reason = driver._should_rotate_session("s1")
+        assert should is False
+
+    def test_should_rotate_no_session(
+        self, project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """Rotation returns False when session_id is None."""
+        driver = LoopDriver(project_dir, config, dry_run=True, skip_preflight=True)
+        should, reason = driver._should_rotate_session(None)
+        assert should is False
+
+
 class TestComputeCooldown:
     def test_first_timeout_returns_base(
         self, project_dir: Path, config: WorkflowConfig,

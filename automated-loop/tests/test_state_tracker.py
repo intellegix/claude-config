@@ -288,3 +288,67 @@ class TestSessionValidation:
         tracker.state.last_session_id = "some-session-id"
         tracker.clear_session()
         assert tracker.state.last_session_id is None
+
+
+class TestSessionTracking:
+    def test_get_session_turns_no_cycles(self, project_dir: Path) -> None:
+        """Returns 0 when no cycles exist."""
+        tracker = StateTracker(project_dir)
+        assert tracker.get_session_turns("any-session") == 0
+
+    def test_get_session_turns_no_session_id(self, project_dir: Path) -> None:
+        """Returns 0 when no session_id provided and no last_session_id."""
+        tracker = StateTracker(project_dir)
+        assert tracker.get_session_turns() == 0
+
+    def test_get_session_turns_single_session(self, project_dir: Path) -> None:
+        """Correctly sums turns for a single session."""
+        tracker = StateTracker(project_dir)
+        for i in range(3):
+            tracker.increment_iteration()
+            tracker.add_cycle(prompt=f"step {i}", session_id="sess-1", num_turns=10)
+        assert tracker.get_session_turns("sess-1") == 30
+
+    def test_get_session_turns_filters_by_session(self, project_dir: Path) -> None:
+        """Only counts turns for the matching session_id."""
+        tracker = StateTracker(project_dir)
+        tracker.increment_iteration()
+        tracker.add_cycle(prompt="step 1", session_id="sess-1", num_turns=10)
+        tracker.increment_iteration()
+        tracker.add_cycle(prompt="step 2", session_id="sess-2", num_turns=20)
+        tracker.increment_iteration()
+        tracker.add_cycle(prompt="step 3", session_id="sess-1", num_turns=15)
+
+        assert tracker.get_session_turns("sess-1") == 25
+        assert tracker.get_session_turns("sess-2") == 20
+
+    def test_get_session_turns_uses_last_session_id(self, project_dir: Path) -> None:
+        """Defaults to last_session_id when no explicit session_id given."""
+        tracker = StateTracker(project_dir)
+        tracker.increment_iteration()
+        tracker.add_cycle(prompt="step 1", session_id="sess-1", num_turns=10)
+        assert tracker.get_session_turns() == 10  # last_session_id = "sess-1"
+
+    def test_get_session_cost_no_cycles(self, project_dir: Path) -> None:
+        """Returns 0.0 when no cycles exist."""
+        tracker = StateTracker(project_dir)
+        assert tracker.get_session_cost("any-session") == 0.0
+
+    def test_get_session_cost_single_session(self, project_dir: Path) -> None:
+        """Correctly sums cost for a single session."""
+        tracker = StateTracker(project_dir)
+        for i in range(3):
+            tracker.increment_iteration()
+            tracker.add_cycle(prompt=f"step {i}", session_id="sess-1", cost_usd=1.50)
+        assert tracker.get_session_cost("sess-1") == pytest.approx(4.50)
+
+    def test_get_session_cost_filters_by_session(self, project_dir: Path) -> None:
+        """Only counts cost for the matching session_id."""
+        tracker = StateTracker(project_dir)
+        tracker.increment_iteration()
+        tracker.add_cycle(prompt="step 1", session_id="sess-1", cost_usd=2.0)
+        tracker.increment_iteration()
+        tracker.add_cycle(prompt="step 2", session_id="sess-2", cost_usd=5.0)
+
+        assert tracker.get_session_cost("sess-1") == pytest.approx(2.0)
+        assert tracker.get_session_cost("sess-2") == pytest.approx(5.0)

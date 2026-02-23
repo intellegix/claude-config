@@ -25,6 +25,14 @@
 !mcp-servers/browser-bridge/**
 !automated-loop/
 !automated-loop/**
+!patterns/
+!patterns/**
+!agents/
+!agents/**
+!rules/
+!rules/**
+!handoffs/
+!handoffs/**
 
 # Exclude generated/runtime files within tracked dirs
 council-automation/__pycache__/

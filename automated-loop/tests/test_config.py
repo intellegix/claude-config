@@ -240,3 +240,42 @@ class TestModelAwareConfig:
     def test_model_fallback_empty_disables(self) -> None:
         config = WorkflowConfig(limits={"model_fallback": {}})
         assert config.limits.model_fallback == {}
+
+
+class TestSessionRotationConfig:
+    def test_session_rotation_defaults(self) -> None:
+        from config import StagnationConfig
+        cfg = StagnationConfig()
+        assert cfg.session_max_turns == 200
+        assert cfg.session_max_cost_usd == 20.0
+        assert cfg.context_exhaustion_turn_threshold == 5
+        assert cfg.context_exhaustion_window == 3
+
+    def test_session_rotation_in_workflow_config(self) -> None:
+        config = WorkflowConfig()
+        assert config.stagnation.session_max_turns == 200
+        assert config.stagnation.session_max_cost_usd == 20.0
+
+    def test_session_rotation_custom(self) -> None:
+        config = WorkflowConfig(
+            stagnation={
+                "session_max_turns": 100,
+                "session_max_cost_usd": 10.0,
+                "context_exhaustion_turn_threshold": 3,
+                "context_exhaustion_window": 5,
+            }
+        )
+        assert config.stagnation.session_max_turns == 100
+        assert config.stagnation.session_max_cost_usd == 10.0
+        assert config.stagnation.context_exhaustion_turn_threshold == 3
+        assert config.stagnation.context_exhaustion_window == 5
+
+    def test_session_rotation_validation(self) -> None:
+        with pytest.raises(Exception):
+            WorkflowConfig(stagnation={"session_max_turns": 5})  # ge=10
+
+        with pytest.raises(Exception):
+            WorkflowConfig(stagnation={"session_max_cost_usd": 0})  # gt=0
+
+        with pytest.raises(Exception):
+            WorkflowConfig(stagnation={"context_exhaustion_window": 1})  # ge=2

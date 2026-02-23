@@ -1,9 +1,9 @@
-# claude-code-toolkit
+# intellegix-code-agent-toolkit
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11+-green.svg)](https://python.org)
 [![Node.js 18+](https://img.shields.io/badge/Node.js-18+-green.svg)](https://nodejs.org)
-[![Tests: 175+](https://img.shields.io/badge/Tests-175+-brightgreen.svg)](automated-loop/tests/)
+[![Tests: 194](https://img.shields.io/badge/Tests-194-brightgreen.svg)](automated-loop/tests/)
 
 A modular configuration system for Claude Code CLI. Includes an automated loop driver, custom slash commands, multi-model council automation, MCP browser bridge, and portfolio governance.
 
@@ -34,7 +34,7 @@ A modular configuration system for Claude Code CLI. Includes an automated loop d
 │   ├── state_tracker.py       # Workflow state persistence + budget
 │   ├── log_redactor.py        # API key scrubbing from logs
 │   ├── loop_driver.ps1        # PowerShell wrapper
-│   └── tests/                 # 175+ pytest tests
+│   └── tests/                 # 194 pytest tests
 │
 ├── commands/                  # Custom slash commands
 │   ├── research-perplexity.md # Deep research via Perplexity
@@ -117,7 +117,7 @@ A modular configuration system for Claude Code CLI. Includes an automated loop d
 
 ```bash
 # Clone to ~/.claude (or your Claude Code config directory)
-git clone https://github.com/yourusername/claude-code-toolkit.git ~/.claude
+git clone https://github.com/intellegix/intellegix-code-agent-toolkit.git ~/.claude
 
 # Install automated loop dependencies
 cd ~/.claude/automated-loop
