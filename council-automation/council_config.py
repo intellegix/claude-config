@@ -100,6 +100,13 @@ BROWSER_POLL_INTERVAL = 2_000  # ms, check interval
 BROWSER_STABLE_MS_RESEARCH = 50_000   # ms, research pauses 15-30s+ between sections
 BROWSER_STABLE_MS_LABS = 60_000       # ms, labs can pause even longer
 BROWSER_POLL_INTERVAL_RESEARCH = 3_000  # ms, slightly slower polling for long responses
+
+# DOM signal guards — prevent premature completion detection
+# Perplexity shows sources/action buttons mid-generation; don't trust DOM signals early
+BROWSER_DOM_MIN_ELAPSED_RESEARCH = 45_000  # ms, ignore DOM signals for first 45s (research)
+BROWSER_DOM_MIN_ELAPSED_LABS = 90_000      # ms, ignore DOM signals for first 90s (labs)
+BROWSER_DOM_MIN_TEXT_LENGTH = 1500         # chars, require substantial text before trusting DOM
+BROWSER_DOM_CONFIRM_WAIT = 10_000          # ms, after DOM signals trigger, wait and re-check
 BROWSER_TYPE_DELAY = 30  # ms between keystrokes
 BROWSER_USER_DATA_DIR = Path.home() / ".claude" / "config" / "playwright-chrome-profile"
 BROWSER_SESSION_PATH = Path.home() / ".claude" / "config" / "playwright-session.json"

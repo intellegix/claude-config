@@ -35,6 +35,10 @@ from council_config import (
     BROWSER_STABLE_MS_RESEARCH,
     BROWSER_RESEARCH_TIMEOUT,
     BROWSER_TIMEOUT,
+    BROWSER_DOM_MIN_ELAPSED_RESEARCH,
+    BROWSER_DOM_MIN_ELAPSED_LABS,
+    BROWSER_DOM_MIN_TEXT_LENGTH,
+    BROWSER_DOM_CONFIRM_WAIT,
     BROWSER_TYPE_DELAY,
     BROWSER_USER_DATA_DIR,
     MAX_CONCURRENT_SESSIONS,
@@ -1070,31 +1074,50 @@ class PerplexityCouncil:
 
         Unlike council CSS fallback, this:
         - Skips Phase A (no model checkmarks in research/labs)
-        - Uses longer stability threshold (25-30s vs 8s)
-        - Checks DOM signals (sources, action buttons) as primary completion
+        - Uses longer stability threshold (50-60s vs 8s)
+        - Checks DOM signals with guards (min elapsed time + min text length + confirmation)
         - Tracks text growth to prevent false stability on pauses
         """
         # Mode-aware thresholds
         if self.perplexity_mode == "labs":
             stable_ms = BROWSER_STABLE_MS_LABS
+            dom_min_elapsed = BROWSER_DOM_MIN_ELAPSED_LABS / 1000
         else:
             stable_ms = BROWSER_STABLE_MS_RESEARCH
+            dom_min_elapsed = BROWSER_DOM_MIN_ELAPSED_RESEARCH / 1000
         poll_interval = BROWSER_POLL_INTERVAL_RESEARCH / 1000  # 3s
-        stable_threshold = stable_ms / 1000  # 25s or 30s
+        stable_threshold = stable_ms / 1000  # 50s or 60s
+        dom_min_text = BROWSER_DOM_MIN_TEXT_LENGTH
+        dom_confirm_wait = BROWSER_DOM_CONFIRM_WAIT / 1000  # 10s
 
         last_text_len = 0
         stable_since = time.time()
-        _log(f"Research/labs fallback: polling with {stable_threshold}s stability threshold...")
+        _log(f"Research/labs fallback: polling with {stable_threshold}s stability, "
+             f"{dom_min_elapsed}s DOM guard, {dom_min_text} char minimum...")
 
         while (time.time() - start) * 1000 < timeout:
-            # Layer 1: DOM signals (highest confidence)
-            try:
-                dom = await self._detect_dom_completion(page)
-                if not dom['isStreaming'] and dom['hasActionButtons'] and (dom['hasSources'] or dom['hasRelated']):
-                    _log(f"Completion via DOM signals (sources={dom['hasSources']}, actions={dom['hasActionButtons']})")
-                    return True
-            except Exception:
-                pass
+            elapsed = time.time() - start
+
+            # Layer 1: DOM signals (guarded — skip early in generation)
+            if elapsed >= dom_min_elapsed:
+                try:
+                    current_len_check = await self._get_text_length(page)
+                    if current_len_check >= dom_min_text:
+                        dom = await self._detect_dom_completion(page)
+                        if not dom['isStreaming'] and dom['hasActionButtons'] and (dom['hasSources'] or dom['hasRelated']):
+                            # Confirmation: wait and verify text stopped growing
+                            _log(f"DOM signals detected at {elapsed:.0f}s ({current_len_check} chars), confirming stability for {dom_confirm_wait}s...")
+                            pre_confirm_len = current_len_check
+                            await asyncio.sleep(dom_confirm_wait)
+                            post_confirm_len = await self._get_text_length(page)
+                            if post_confirm_len == pre_confirm_len:
+                                _log(f"Completion confirmed via DOM signals + stability (sources={dom['hasSources']}, actions={dom['hasActionButtons']}, {post_confirm_len} chars)")
+                                return True
+                            else:
+                                _log(f"DOM signals were premature — text grew from {pre_confirm_len} to {post_confirm_len} during confirm wait")
+                                stable_since = time.time()  # Reset stability timer
+                except Exception:
+                    pass
 
             # Layer 2: Text growth tracking
             current_len = await self._get_text_length(page)
@@ -1102,8 +1125,8 @@ class PerplexityCouncil:
                 last_text_len = current_len
                 stable_since = time.time()  # Reset — content still growing
 
-            # Layer 3: Stability timeout (mode-aware)
-            if current_len > 100 and (time.time() - stable_since) >= stable_threshold:
+            # Layer 3: Stability timeout (mode-aware, requires substantial text)
+            if current_len >= dom_min_text and (time.time() - stable_since) >= stable_threshold:
                 _log(f"Completion via text stability ({stable_threshold}s, {current_len} chars)")
                 return True
 
