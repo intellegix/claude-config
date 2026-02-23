@@ -1007,9 +1007,16 @@ class PerplexityCouncil:
                     else:
                         consecutive_complete += 1
                         if consecutive_complete >= 2:
-                            _log(f"Vision (research): page complete (confirmed 2x) ({time.time() - start:.1f}s)")
-                            return True
-                        _log("  Vision (research): complete (need 1 more confirmation)")
+                            elapsed = time.time() - start
+                            min_elapsed = BROWSER_DOM_MIN_ELAPSED_LABS / 1000 if self.perplexity_mode == "labs" else BROWSER_DOM_MIN_ELAPSED_RESEARCH / 1000
+                            if elapsed < min_elapsed:
+                                _log(f"  Vision: ignoring early complete ({elapsed:.0f}s < {min_elapsed:.0f}s min)")
+                                consecutive_complete = 0
+                            else:
+                                _log(f"Vision (research): page complete (confirmed 2x) ({elapsed:.1f}s)")
+                                return True
+                        else:
+                            _log("  Vision (research): complete (need 1 more confirmation)")
                 else:
                     consecutive_complete = 0
 
