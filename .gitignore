@@ -11,9 +11,13 @@
 !LICENSE
 !NOTICE
 !README.md
+!SECURITY.md
+!CONTRIBUTING.md
 !perplexity-selectors.json
 
 # Include tracked directories
+!.github/
+!.github/**
 !council-automation/
 !council-automation/**
 !commands/
