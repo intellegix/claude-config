@@ -709,34 +709,27 @@ class PerplexityCouncil:
         return await self.activate_mode(page)
 
     async def submit_query(self, page, query: str) -> None:
-        """Type and submit the query."""
+        """Type and submit the query.
+
+        For research/labs/council modes, uses clipboard paste to preserve
+        the slash command activation state. page.fill() and native value
+        setters clobber React state, which deactivates the mode.
+        """
         textarea = self.selectors.get("textarea", "#ask-input")
 
-        # Try native setter first (preserves newlines), fall back to page.fill()
+        # Focus the input
         try:
-            filled = await page.evaluate(
-                """([sel, text]) => {
-                    const el = document.querySelector(sel);
-                    if (!el) return false;
-                    // Try textarea/input native setter (React-compatible)
-                    const proto = el.tagName === 'TEXTAREA'
-                        ? HTMLTextAreaElement.prototype
-                        : HTMLInputElement.prototype;
-                    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-                    if (setter) {
-                        setter.call(el, text);
-                        el.dispatchEvent(new Event('input', { bubbles: true }));
-                        return true;
-                    }
-                    return false;
-                }""",
-                [textarea, query],
-            )
-            if not filled:
-                raise ValueError("Native setter failed")
+            await page.click(textarea)
+            await page.wait_for_timeout(300)
         except Exception:
-            _log("Native setter unavailable, using page.fill()")
-            await page.fill(textarea, query)
+            pass
+
+        # Use keyboard.type() to preserve React state (slash command mode).
+        # page.fill() and native value setters clobber React's internal mode
+        # flag, deactivating /research or /council. keyboard.type() dispatches
+        # real keystrokes that go through React's event pipeline.
+        await page.keyboard.type(query, delay=BROWSER_TYPE_DELAY)
+        _log(f"Query typed via keyboard ({len(query)} chars)")
         await page.wait_for_timeout(500)
 
         # Submit via Enter
