@@ -1147,9 +1147,13 @@ class PerplexityCouncil:
                 last_text_len = current_len
                 stable_since = time.time()  # Reset — content still growing
 
-            # Layer 3: Stability timeout (mode-aware, requires substantial text)
-            if current_len >= dom_min_text and (time.time() - stable_since) >= stable_threshold:
-                _log(f"Completion via text stability ({stable_threshold}s, {current_len} chars)")
+            # Layer 3: Stability timeout (mode-aware, requires substantial text + min elapsed)
+            # Guard: don't trust stability before dom_min_elapsed — Perplexity pauses 60-120s
+            # between "thinking" phases, so early stability is almost certainly a false positive.
+            if (elapsed >= dom_min_elapsed
+                    and current_len >= dom_min_text
+                    and (time.time() - stable_since) >= stable_threshold):
+                _log(f"Completion via text stability ({stable_threshold}s, {current_len} chars, {elapsed:.0f}s elapsed)")
                 return True
 
             await asyncio.sleep(poll_interval)

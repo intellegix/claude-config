@@ -96,9 +96,11 @@ BROWSER_LABS_TIMEOUT = 840_000  # ms, labs mode — 14 min (1 min buffer under 1
 BROWSER_STABLE_MS = 8_000  # ms, content unchanged = stable
 BROWSER_POLL_INTERVAL = 2_000  # ms, check interval
 
-# Mode-aware stability thresholds (research/labs pause >8s between sections)
-BROWSER_STABLE_MS_RESEARCH = 50_000   # ms, research pauses 15-30s+ between sections
-BROWSER_STABLE_MS_LABS = 60_000       # ms, labs can pause even longer
+# Mode-aware stability thresholds (research/labs pause 60-120s+ between sections)
+# These must be LONGER than the longest Perplexity "thinking" pause to avoid
+# declaring completion during an inter-section pause.
+BROWSER_STABLE_MS_RESEARCH = 120_000  # ms, research thinking pauses can be 60-120s
+BROWSER_STABLE_MS_LABS = 150_000      # ms, labs can pause even longer
 BROWSER_POLL_INTERVAL_RESEARCH = 3_000  # ms, slightly slower polling for long responses
 
 # DOM signal guards — prevent premature completion detection
