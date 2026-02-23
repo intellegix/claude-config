@@ -645,10 +645,12 @@ class PerplexityCouncil:
     async def _detect_dom_completion(self, page) -> dict:
         """Check Perplexity DOM for completion signals (research/labs modes)."""
         return await page.evaluate("""() => {
-            // Signal 1: No streaming/loading indicators
+            // Signal 1: No streaming/loading indicators (includes Perplexity-specific selectors)
             const streaming = document.querySelectorAll(
                 '[class*="streaming"], [class*="loading"], [class*="generating"], '
-                + '[class*="animate-pulse"], [class*="animate-spin"]'
+                + '[class*="animate-pulse"], [class*="animate-spin"], '
+                + '[class*="cursor"], [class*="typing"], [class*="progress"], '
+                + '.animate-blink, [data-testid*="loading"]'
             );
 
             // Signal 2: Sources/citations section visible
@@ -672,12 +674,19 @@ class PerplexityCouncil:
                 '[class*="related"], [data-testid*="related"]'
             );
 
+            // Signal 6: Stop/Cancel button present = still generating
+            const stopBtn = document.querySelector(
+                'button[aria-label*="Stop"], button[aria-label*="Cancel"], '
+                + 'button[class*="stop"], [data-testid*="stop"]'
+            );
+
             return {
                 isStreaming: streaming.length > 0,
                 hasSources: !!sources,
                 hasActionButtons: actions.length >= 2,
                 hasFollowUp: !!followUp,
                 hasRelated: !!related,
+                hasStopButton: !!stopBtn,
             };
         }""")
 
@@ -700,7 +709,13 @@ class PerplexityCouncil:
         return await self.activate_mode(page)
 
     async def submit_query(self, page, query: str) -> None:
-        """Type and submit the query."""
+        """Type and submit the query.
+
+        Mode activation (/research, /council, /labs) is already completed
+        before this method is called, so the mode is locked in. Native
+        setter (fast paste) is safe here — it sets the query text without
+        affecting the already-activated mode.
+        """
         textarea = self.selectors.get("textarea", "#ask-input")
 
         # Try native setter first (preserves newlines), fall back to page.fill()
@@ -992,9 +1007,16 @@ class PerplexityCouncil:
                     else:
                         consecutive_complete += 1
                         if consecutive_complete >= 2:
-                            _log(f"Vision (research): page complete (confirmed 2x) ({time.time() - start:.1f}s)")
-                            return True
-                        _log("  Vision (research): complete (need 1 more confirmation)")
+                            elapsed = time.time() - start
+                            min_elapsed = BROWSER_DOM_MIN_ELAPSED_LABS / 1000 if self.perplexity_mode == "labs" else BROWSER_DOM_MIN_ELAPSED_RESEARCH / 1000
+                            if elapsed < min_elapsed:
+                                _log(f"  Vision: ignoring early complete ({elapsed:.0f}s < {min_elapsed:.0f}s min)")
+                                consecutive_complete = 0
+                            else:
+                                _log(f"Vision (research): page complete (confirmed 2x) ({elapsed:.1f}s)")
+                                return True
+                        else:
+                            _log("  Vision (research): complete (need 1 more confirmation)")
                 else:
                     consecutive_complete = 0
 
@@ -1093,7 +1115,8 @@ class PerplexityCouncil:
         last_text_len = 0
         stable_since = time.time()
         _log(f"Research/labs fallback: polling with {stable_threshold}s stability, "
-             f"{dom_min_elapsed}s DOM guard, {dom_min_text} char minimum...")
+             f"{dom_min_elapsed}s DOM guard, {dom_confirm_wait}s growth-polling confirm, "
+             f"{dom_min_text} char minimum...")
 
         while (time.time() - start) * 1000 < timeout:
             elapsed = time.time() - start
@@ -1104,17 +1127,29 @@ class PerplexityCouncil:
                     current_len_check = await self._get_text_length(page)
                     if current_len_check >= dom_min_text:
                         dom = await self._detect_dom_completion(page)
-                        if not dom['isStreaming'] and dom['hasActionButtons'] and (dom['hasSources'] or dom['hasRelated']):
-                            # Confirmation: wait and verify text stopped growing
-                            _log(f"DOM signals detected at {elapsed:.0f}s ({current_len_check} chars), confirming stability for {dom_confirm_wait}s...")
-                            pre_confirm_len = current_len_check
-                            await asyncio.sleep(dom_confirm_wait)
-                            post_confirm_len = await self._get_text_length(page)
-                            if post_confirm_len == pre_confirm_len:
-                                _log(f"Completion confirmed via DOM signals + stability (sources={dom['hasSources']}, actions={dom['hasActionButtons']}, {post_confirm_len} chars)")
+                        if (not dom['isStreaming'] and not dom.get('hasStopButton', False)
+                                and dom['hasActionButtons'] and (dom['hasSources'] or dom['hasRelated'])):
+                            # Growth-polling confirmation: check every 5s during confirm window
+                            _log(f"DOM signals detected at {elapsed:.0f}s ({current_len_check} chars), "
+                                 f"verifying with {dom_confirm_wait}s growth check...")
+                            growth_detected = False
+                            check_interval = 5  # seconds
+                            checks = int(dom_confirm_wait / check_interval)
+                            prev_len = current_len_check
+                            for check_i in range(checks):
+                                await asyncio.sleep(check_interval)
+                                new_len = await self._get_text_length(page)
+                                if new_len != prev_len:
+                                    growth_detected = True
+                                    _log(f"  Text grew during confirm check {check_i+1}/{checks}: {prev_len} → {new_len}")
+                                    break
+                                prev_len = new_len
+                            if not growth_detected:
+                                _log(f"Completion confirmed via DOM signals + {dom_confirm_wait}s growth polling "
+                                     f"(sources={dom['hasSources']}, actions={dom['hasActionButtons']}, {prev_len} chars)")
                                 return True
                             else:
-                                _log(f"DOM signals were premature — text grew from {pre_confirm_len} to {post_confirm_len} during confirm wait")
+                                _log(f"DOM signals were premature — text still growing, resetting stability timer")
                                 stable_since = time.time()  # Reset stability timer
                 except Exception:
                     pass
@@ -1125,9 +1160,13 @@ class PerplexityCouncil:
                 last_text_len = current_len
                 stable_since = time.time()  # Reset — content still growing
 
-            # Layer 3: Stability timeout (mode-aware, requires substantial text)
-            if current_len >= dom_min_text and (time.time() - stable_since) >= stable_threshold:
-                _log(f"Completion via text stability ({stable_threshold}s, {current_len} chars)")
+            # Layer 3: Stability timeout (mode-aware, requires substantial text + min elapsed)
+            # Guard: don't trust stability before dom_min_elapsed — Perplexity pauses 60-120s
+            # between "thinking" phases, so early stability is almost certainly a false positive.
+            if (elapsed >= dom_min_elapsed
+                    and current_len >= dom_min_text
+                    and (time.time() - stable_since) >= stable_threshold):
+                _log(f"Completion via text stability ({stable_threshold}s, {current_len} chars, {elapsed:.0f}s elapsed)")
                 return True
 
             await asyncio.sleep(poll_interval)

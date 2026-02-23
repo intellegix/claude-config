@@ -96,17 +96,19 @@ BROWSER_LABS_TIMEOUT = 840_000  # ms, labs mode — 14 min (1 min buffer under 1
 BROWSER_STABLE_MS = 8_000  # ms, content unchanged = stable
 BROWSER_POLL_INTERVAL = 2_000  # ms, check interval
 
-# Mode-aware stability thresholds (research/labs pause >8s between sections)
-BROWSER_STABLE_MS_RESEARCH = 50_000   # ms, research pauses 15-30s+ between sections
-BROWSER_STABLE_MS_LABS = 60_000       # ms, labs can pause even longer
+# Mode-aware stability thresholds (research/labs pause 60-120s+ between sections)
+# These must be LONGER than the longest Perplexity "thinking" pause to avoid
+# declaring completion during an inter-section pause.
+BROWSER_STABLE_MS_RESEARCH = 240_000  # ms, 4 min — research thinking pauses can be 60-120s (2x safety margin)
+BROWSER_STABLE_MS_LABS = 300_000      # ms, 5 min — labs can pause even longer (2x safety margin)
 BROWSER_POLL_INTERVAL_RESEARCH = 3_000  # ms, slightly slower polling for long responses
 
 # DOM signal guards — prevent premature completion detection
 # Perplexity shows sources/action buttons mid-generation; don't trust DOM signals early
-BROWSER_DOM_MIN_ELAPSED_RESEARCH = 45_000  # ms, ignore DOM signals for first 45s (research)
-BROWSER_DOM_MIN_ELAPSED_LABS = 90_000      # ms, ignore DOM signals for first 90s (labs)
-BROWSER_DOM_MIN_TEXT_LENGTH = 1500         # chars, require substantial text before trusting DOM
-BROWSER_DOM_CONFIRM_WAIT = 10_000          # ms, after DOM signals trigger, wait and re-check
+BROWSER_DOM_MIN_ELAPSED_RESEARCH = 240_000  # ms, ignore DOM/vision signals for first 4 min (2x safety margin)
+BROWSER_DOM_MIN_ELAPSED_LABS = 360_000      # ms, ignore DOM/vision signals for first 6 min (2x safety margin)
+BROWSER_DOM_MIN_TEXT_LENGTH = 3000          # chars, research reports are 5000+ when complete
+BROWSER_DOM_CONFIRM_WAIT = 30_000           # ms, polling window with 5s growth checks (must exceed longest inter-section pause)
 BROWSER_TYPE_DELAY = 30  # ms between keystrokes
 BROWSER_USER_DATA_DIR = Path.home() / ".claude" / "config" / "playwright-chrome-profile"
 BROWSER_SESSION_PATH = Path.home() / ".claude" / "config" / "playwright-session.json"
