@@ -25,6 +25,7 @@ import tempfile
 
 from council_config import (
     BROWSER_HEADLESS,
+    BROWSER_HEADLESS_FALLBACK,
     BROWSER_LABS_TIMEOUT,
     BROWSER_LOCALSTORAGE_PATH,
     BROWSER_POLL_INTERVAL,
@@ -295,8 +296,10 @@ class PerplexityCouncil:
         save_artifacts: bool = False,
         perplexity_mode: str = "council",
         use_persistent: bool = False,
+        headless_fallback: bool = BROWSER_HEADLESS_FALLBACK,
     ):
         self.headless = headless
+        self.headless_fallback = headless_fallback
         self.session_path = session_path or BROWSER_SESSION_PATH
         # Research/labs modes get longer timeouts
         if timeout == BROWSER_TIMEOUT and perplexity_mode == "research":
@@ -393,61 +396,177 @@ class PerplexityCouncil:
         return storage_state
 
     @staticmethod
+    def _chrome_args() -> list[str]:
+        """Shared Chrome launch arguments for all launch methods."""
+        return [
+            "--disable-blink-features=AutomationControlled",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-dev-shm-usage",
+            "--disable-features=IsolateOrigins,site-per-process",
+            "--window-size=1920,1080",
+        ]
+
+    @staticmethod
     def _stealth_scripts() -> str:
-        """Return JavaScript to reduce automation detection."""
+        """Return JavaScript to reduce automation detection.
+
+        Masks: webdriver flag, chrome.runtime/csi/loadTimes, Playwright globals,
+        navigator.plugins, navigator.languages, WebGL vendor/renderer.
+        """
         return """
+            // Hide webdriver flag
             Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            if (!window.chrome) window.chrome = { runtime: {} };
+
+            // Chrome object stubs
+            if (!window.chrome) window.chrome = {};
+            if (!window.chrome.runtime) window.chrome.runtime = {};
+            if (!window.chrome.csi) window.chrome.csi = function() {
+                return { startE: Date.now(), onloadT: Date.now() + 100, pageT: 300, tran: 15 };
+            };
+            if (!window.chrome.loadTimes) window.chrome.loadTimes = function() {
+                return {
+                    commitLoadTime: Date.now() / 1000,
+                    connectionInfo: 'h2',
+                    finishDocumentLoadTime: Date.now() / 1000 + 0.1,
+                    finishLoadTime: Date.now() / 1000 + 0.2,
+                    firstPaintAfterLoadTime: 0,
+                    firstPaintTime: Date.now() / 1000 + 0.05,
+                    navigationType: 'Other',
+                    npnNegotiatedProtocol: 'h2',
+                    requestTime: Date.now() / 1000 - 0.3,
+                    startLoadTime: Date.now() / 1000 - 0.3,
+                    wasAlternateProtocolAvailable: false,
+                    wasFetchedViaSpdy: true,
+                    wasNpnNegotiated: true,
+                };
+            };
+
+            // Remove Playwright globals
             delete window.__playwright;
             delete window.__pw_manual;
+
+            // navigator.plugins — return a non-empty PluginArray-like object
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => {
+                    const plugins = [
+                        { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer',
+                          description: 'Portable Document Format', length: 1 },
+                        { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai',
+                          description: '', length: 1 },
+                        { name: 'Native Client', filename: 'internal-nacl-plugin',
+                          description: '', length: 2 },
+                    ];
+                    plugins.refresh = () => {};
+                    Object.setPrototypeOf(plugins, PluginArray.prototype);
+                    return plugins;
+                },
+            });
+
+            // navigator.languages
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['en-US', 'en'],
+            });
+
+            // WebGL vendor/renderer masking
+            const getParameter = WebGLRenderingContext.prototype.getParameter;
+            WebGLRenderingContext.prototype.getParameter = function(param) {
+                // UNMASKED_VENDOR_WEBGL
+                if (param === 37445) return 'Google Inc. (NVIDIA)';
+                // UNMASKED_RENDERER_WEBGL
+                if (param === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1080 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+                return getParameter.call(this, param);
+            };
+            const getParameter2 = WebGL2RenderingContext.prototype.getParameter;
+            WebGL2RenderingContext.prototype.getParameter = function(param) {
+                if (param === 37445) return 'Google Inc. (NVIDIA)';
+                if (param === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1080 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+                return getParameter2.call(this, param);
+            };
         """
 
+    async def _detect_cloudflare(self, page) -> bool:
+        """Check if the current page is a Cloudflare challenge/block page."""
+        try:
+            title = await page.title()
+            content = await page.evaluate("document.body.innerText.substring(0, 500)")
+            indicators = [
+                "Just a moment" in title,
+                "Verify you are human" in content,
+                "Checking your browser" in content,
+                "cf-challenge" in (await page.content())[:2000],
+                "challenges.cloudflare.com" in (await page.content())[:2000],
+            ]
+            return any(indicators)
+        except Exception:
+            return False
+
     async def start(self) -> None:
-        """Launch browser. Uses non-persistent context by default (supports concurrency)."""
+        """Launch browser. Uses non-persistent context by default (supports concurrency).
+
+        If headless_fallback is True, launches headless first, navigates to Perplexity,
+        and if Cloudflare blocks the page, closes and re-launches in headful mode.
+        """
         from playwright.async_api import async_playwright
 
         self.playwright = await async_playwright().start()
 
-        if self.use_persistent:
+        if self.headless_fallback and self.headless:
+            # Try headless first
+            _log("Headless-fallback: trying headless launch first...")
+            await self._start_non_persistent()
+            page = await self.context.new_page()
+            try:
+                await page.goto(
+                    "https://www.perplexity.ai/",
+                    wait_until="domcontentloaded",
+                    timeout=15000,
+                )
+                await page.wait_for_timeout(3000)
+                if await self._detect_cloudflare(page):
+                    _log("Headless-fallback: Cloudflare detected, switching to headful...")
+                    await page.close()
+                    await self._cleanup_browser()
+                    self.headless = False
+                    await self._start_non_persistent()
+                else:
+                    _log("Headless-fallback: no Cloudflare detected, proceeding headless")
+                    await page.close()
+            except Exception as e:
+                _log(f"Headless-fallback: navigation error ({e}), switching to headful...")
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+                await self._cleanup_browser()
+                self.headless = False
+                await self._start_non_persistent()
+        elif self.use_persistent:
             await self._start_persistent()
         else:
             await self._start_non_persistent()
 
     async def _start_non_persistent(self) -> None:
-        """Launch browser with browser.new_context(storage_state=...).
+        """Launch browser with an isolated temp profile directory.
 
-        No shared profile directory — supports multiple concurrent sessions.
+        Each session gets its own user-data-dir via launch_persistent_context()
+        to prevent Chrome SingletonLock conflicts when multiple instances run
+        concurrently. Cookies injected via _load_session() after launch.
         """
+        self._temp_profile_dir = tempfile.mkdtemp(prefix="council_np_")
+        _log(f"Non-persistent: using isolated profile {self._temp_profile_dir}")
         pids_before = _get_chrome_pids() if not self.headless else set()
-        self._browser = await self.playwright.chromium.launch(
+
+        self.context = await self.playwright.chromium.launch_persistent_context(
+            user_data_dir=self._temp_profile_dir,
             channel="chrome",
             headless=self.headless,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-first-run",
-                "--no-default-browser-check",
-            ],
+            args=self._chrome_args(),
+            viewport={"width": 1920, "height": 1080},
         )
 
-        storage_state = self._build_storage_state(self.session_path)
-
-        if storage_state:
-            self.context = await self._browser.new_context(
-                viewport={"width": 1280, "height": 900},
-                storage_state=storage_state,
-            )
-            _log(f"Loaded {len(storage_state['cookies'])} cookies from {self.session_path.name}")
-            ls_origins = storage_state.get("origins", [])
-            if ls_origins:
-                ls_count = len(ls_origins[0].get("localStorage", []))
-                _log(f"Injected {ls_count} localStorage items")
-        else:
-            self.context = await self._browser.new_context(
-                viewport={"width": 1280, "height": 900},
-            )
-            # Fallback: try loading session via add_cookies if file exists
-            if self.session_path.exists():
-                await self._load_session()
+        if self.session_path.exists():
+            await self._load_session()
 
         # Apply stealth scripts
         await self.context.add_init_script(self._stealth_scripts())
@@ -464,16 +583,14 @@ class PerplexityCouncil:
             user_data_dir=str(BROWSER_USER_DATA_DIR),
             channel="chrome",
             headless=self.headless,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-first-run",
-                "--no-default-browser-check",
-            ],
-            viewport={"width": 1280, "height": 900},
+            args=self._chrome_args(),
+            viewport={"width": 1920, "height": 1080},
         )
 
         if self.session_path.exists():
             await self._load_session()
+
+        await self.context.add_init_script(self._stealth_scripts())
 
         if not self.headless:
             self._spawned_pids |= (_get_chrome_pids() - pids_before)
@@ -484,7 +601,7 @@ class PerplexityCouncil:
         Uses a unique temp dir per session — no SingletonLock conflicts.
         Cookies injected via _load_session() after launch.
         """
-        self._temp_profile_dir = tempfile.mkdtemp(prefix="council_browser_")
+        self._temp_profile_dir = tempfile.mkdtemp(prefix="council_cf_")
         _log(f"Cloudflare fallback: using temp profile {self._temp_profile_dir}")
         pids_before = _get_chrome_pids() if not self.headless else set()
 
@@ -492,16 +609,14 @@ class PerplexityCouncil:
             user_data_dir=self._temp_profile_dir,
             channel="chrome",
             headless=self.headless,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-first-run",
-                "--no-default-browser-check",
-            ],
-            viewport={"width": 1280, "height": 900},
+            args=self._chrome_args(),
+            viewport={"width": 1920, "height": 1080},
         )
 
         if self.session_path.exists():
             await self._load_session()
+
+        await self.context.add_init_script(self._stealth_scripts())
 
         if not self.headless:
             self._spawned_pids |= (_get_chrome_pids() - pids_before)
@@ -1924,17 +2039,26 @@ async def main() -> None:
         help="Save screenshots/HTML on failure (default: True when --opus-synthesis)")
     parser.add_argument("--perplexity-mode", choices=["council", "research", "labs"], default="council",
         help="Perplexity slash command: /council (multi-model), /research (deep research), or /labs (experimental labs)")
+    parser.add_argument("--headless-fallback", action="store_true",
+        help="Try headless first, fall back to headful if Cloudflare blocks")
 
     args = parser.parse_args()
 
+    # --headless-fallback implies starting headless (overrides --headful)
+    headless = not args.headful
+    headless_fallback = args.headless_fallback
+    if headless_fallback:
+        headless = True  # Start headless, auto-switch if blocked
+
     session_path = Path(args.session_path) if args.session_path else None
     council = PerplexityCouncil(
-        headless=not args.headful,
+        headless=headless,
         session_path=session_path,
         timeout=args.timeout,
         save_artifacts=args.save_artifacts,
         perplexity_mode=args.perplexity_mode,
         use_persistent=args.save_session,  # Persistent context only for --save-session
+        headless_fallback=headless_fallback,
     )
 
     if args.save_session:
