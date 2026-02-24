@@ -3,13 +3,13 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11+-green.svg)](https://python.org)
 [![Node.js 18+](https://img.shields.io/badge/Node.js-18+-green.svg)](https://nodejs.org)
-[![Tests: 194](https://img.shields.io/badge/Tests-194-brightgreen.svg)](automated-loop/tests/)
+[![Tests: 220](https://img.shields.io/badge/Tests-220-brightgreen.svg)](automated-loop/tests/)
 
 A modular configuration system for Claude Code CLI. Includes an automated loop driver, custom slash commands, multi-model council automation, MCP browser bridge, and portfolio governance.
 
 ## Features
 
-- **Automated Loop Driver** - Run Claude Code in autonomous loops with session continuity, budget enforcement, stagnation detection, and model-aware scaling
+- **Automated Loop Driver** - Run Claude Code in autonomous loops with session continuity, budget enforcement, stagnation detection, and model-aware scaling (Sonnet recommended — near Opus quality at lower cost)
 - **Custom Slash Commands** - 15+ reusable commands for research, planning, code review, and deployment workflows
 - **Council Automation** - Multi-model queries via Perplexity (GPT, Claude, Gemini) with Opus synthesis
 - **MCP Browser Bridge** - Chrome extension bridge for browser automation through Claude Code
@@ -34,7 +34,7 @@ A modular configuration system for Claude Code CLI. Includes an automated loop d
 │   ├── state_tracker.py       # Workflow state persistence + budget
 │   ├── log_redactor.py        # API key scrubbing from logs
 │   ├── loop_driver.ps1        # PowerShell wrapper
-│   └── tests/                 # 194 pytest tests
+│   └── tests/                 # 220 pytest tests
 │
 ├── commands/                  # Custom slash commands
 │   ├── research-perplexity.md # Deep research via Perplexity
@@ -143,8 +143,8 @@ python loop_driver.py --smoke-test --verbose
 # Run against a project
 python loop_driver.py --project /path/to/your/project --max-iterations 10 --verbose
 
-# With model selection
-python loop_driver.py --project /path/to/project --model opus --timeout 600 --verbose
+# With model selection (sonnet recommended, opus for complex architecture only)
+python loop_driver.py --project /path/to/project --model sonnet --timeout 600 --verbose
 ```
 
 ## Perplexity Setup
@@ -211,8 +211,8 @@ pytest tests/ -v
 **Exit codes**: 0 = complete, 1 = max iterations, 2 = budget exceeded, 3 = stagnation
 
 **Key features**:
-- Model-aware scaling (Opus: 2x timeout, 25-turn cap)
-- Model fallback (Opus -> Sonnet after consecutive timeouts)
+- Model-aware scaling (Sonnet recommended; Opus: 2x timeout, 25-turn cap)
+- Model fallback (Opus→Sonnet after 2 consecutive timeouts, reverts on productive iteration)
 - Exponential backoff with timeout cooldown
 - Session continuity via `--resume`
 - Stagnation detection with two-strike system
