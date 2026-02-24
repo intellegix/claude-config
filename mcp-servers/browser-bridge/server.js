@@ -25,7 +25,7 @@ import { WebSocket } from 'ws';
 import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { basename, dirname, join, resolve as pathResolve } from 'node:path';
 import { homedir } from 'node:os';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 
 import { CONFIG, _debugLog } from './lib/config.js';
@@ -40,6 +40,23 @@ import { MetricsCollector } from './lib/metrics.js';
 _debugLog(`imports OK — cwd=${process.cwd()} argv=${process.argv.join(' ')} ppid=${process.ppid}`);
 
 const rateLimiter = new RateLimiter(60, 1);
+
+/**
+ * Async wrapper around child_process.execFile — does NOT block the event loop.
+ * Used for long-running council/research/labs queries so multiple can run concurrently.
+ */
+function execFileAsync(command, args, options) {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, options, (error, stdout, stderr) => {
+      if (error) {
+        error.stderr = stderr;
+        reject(error);
+      } else {
+        resolve(stdout);
+      }
+    });
+  });
+}
 
 // ---------------------------------------------------------------------------
 // BrowserBridgeServer — MCP protocol handler
@@ -853,6 +870,9 @@ class BrowserBridgeServer {
         const includeContext = Validator.boolean(args.includeContext, true);
         const scriptDir = join(homedir(), '.claude', 'council-automation');
         const cacheDir = join(homedir(), '.claude', 'council-cache');
+        // Force UTF-8 stdout in Python subprocesses — prevents TextIOWrapper buffering
+        // from eating output when Node pipes use non-UTF-8 encoding (Windows cp1252).
+        const pythonEnv = { ...process.env, PYTHONIOENCODING: 'utf-8' };
 
         // Ensure cache dir exists
         mkdirSync(cacheDir, { recursive: true });
@@ -863,7 +883,7 @@ class BrowserBridgeServer {
             const ctxOut = execFileSync('python', [join(scriptDir, 'session_context.py'), process.cwd()], {
               timeout: CONFIG.timeouts.councilExec,
               encoding: 'utf-8',
-              env: { ...process.env },
+              env: pythonEnv,
             });
             writeFileSync(join(cacheDir, 'session_context.md'), ctxOut, 'utf-8');
           } catch (ctxErr) {
@@ -886,10 +906,10 @@ class BrowserBridgeServer {
 
         // Browser/auto modes need longer timeout; research/labs modes need even more
         const timeout = isLabs ? CONFIG.timeouts.councilLabs : isResearch ? CONFIG.timeouts.councilResearch : (mode === 'browser' || mode === 'auto') ? CONFIG.timeouts.councilBrowser : CONFIG.timeouts.councilApi;
-        const result = execFileSync('python', scriptArgs, {
+        const result = await execFileAsync('python', scriptArgs, {
           timeout,
           encoding: 'utf-8',
-          env: { ...process.env },
+          env: pythonEnv,
           cwd: scriptDir,
         });
         // Check for browser busy error (concurrent session holding the profile lock)
@@ -904,12 +924,13 @@ class BrowserBridgeServer {
 
       case 'council_metrics': {
         const scriptDir = join(homedir(), '.claude', 'council-automation');
+        const pyEnv = { ...process.env, PYTHONIOENCODING: 'utf-8' };
         const result = execFileSync('python', [
           join(scriptDir, 'council_metrics.py'), '--json',
         ], {
           timeout: CONFIG.timeouts.councilExec,
           encoding: 'utf-8',
-          env: { ...process.env },
+          env: pyEnv,
           cwd: scriptDir,
         });
         return JSON.parse(result);
@@ -918,6 +939,7 @@ class BrowserBridgeServer {
       case 'council_read': {
         const level = args.level || 'synthesis';
         const scriptDir = join(homedir(), '.claude', 'council-automation');
+        const pyEnv = { ...process.env, PYTHONIOENCODING: 'utf-8' };
 
         const result = execFileSync('python', [
           join(scriptDir, 'council_query.py'),
@@ -926,7 +948,7 @@ class BrowserBridgeServer {
         ], {
           timeout: CONFIG.timeouts.councilExec,
           encoding: 'utf-8',
-          env: { ...process.env },
+          env: pyEnv,
           cwd: scriptDir,
         });
         return JSON.parse(result);
