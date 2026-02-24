@@ -58,6 +58,18 @@ That's it. The loop reads your project's `CLAUDE.md` for instructions, spawns Cl
 | `config.py` | Pydantic validation of `.workflow/config.json` with model-aware scaling |
 | `log_redactor.py` | Scrubs API keys and secrets from log output |
 
+## Model Selection
+
+**Sonnet is the recommended default.** It performs within ~1.5% of Opus on coding benchmarks at a fraction of the cost and rate-limit pressure. The loop defaults to `--model sonnet`.
+
+| Model | Use Case | Cost | Rate Limits |
+|-------|----------|------|-------------|
+| **Sonnet** (recommended) | General-purpose — code generation, refactoring, debugging, multi-file changes | Low | Generous |
+| **Opus** | Complex architectural decisions, novel algorithm design — rarely worth the tradeoff | High | Restrictive |
+| **Haiku** | Quick, lightweight iterations — linting, formatting, small fixes | Very low | Very generous |
+
+The loop includes an automatic **fallback chain**: if Opus hits 2 consecutive timeouts (common due to rate limits), it falls back to Sonnet automatically and reverts after a productive iteration. This safety net exists for the rare cases where Opus is chosen — but starting with Sonnet avoids the issue entirely.
+
 ## Features
 
 ### Research & Browser Automation
@@ -68,8 +80,8 @@ That's it. The loop reads your project's `CLAUDE.md` for instructions, spawns Cl
 
 ### Loop Orchestration
 - **Zero API keys** — Claude Code subscription handles auth; Perplexity uses browser session
-- **Model-aware scaling** — Opus gets 2x timeout + 25-turn cap; Haiku gets 0.5x timeout
-- **Automatic model fallback** — falls back (e.g., opus to sonnet) after consecutive timeouts, reverts on productive iteration
+- **Model-aware scaling** — Opus gets 2x timeout + 25-turn cap; Haiku gets 0.5x timeout; Sonnet (recommended) uses default scaling
+- **Automatic model fallback** — falls back (e.g., opus→sonnet) after 2 consecutive timeouts, reverts on productive iteration
 - **Session continuity** — `--resume` preserves full context across iterations
 - **Session rotation** — auto-rotates after 200 turns or $20/session to prevent context exhaustion
 - **Budget enforcement** — per-iteration and total budget caps with graceful exit
@@ -88,7 +100,10 @@ That's it. The loop reads your project's `CLAUDE.md` for instructions, spawns Cl
 # Full run with defaults (50 iterations, sonnet model)
 python loop_driver.py --project /path/to/project --verbose
 
-# Specify model and budget
+# Sonnet (recommended) with budget cap
+python loop_driver.py --project . --model sonnet --max-budget 25.0 --verbose
+
+# Opus (only for complex architectural work — higher cost and rate limits)
 python loop_driver.py --project . --model opus --max-budget 25.0 --verbose
 
 # Smoke test (single iteration, reduced limits)
@@ -110,7 +125,7 @@ python loop_driver.py --project . --json-log --verbose
 |------|---------|-------------|
 | `--project` | `.` | Target project directory |
 | `--max-iterations` | `50` | Maximum loop iterations |
-| `--model` | `sonnet` | Claude model (`sonnet`, `opus`, `haiku`) |
+| `--model` | `sonnet` | Claude model — `sonnet` (recommended), `opus`, `haiku` |
 | `--prompt` | auto | Initial prompt for the first iteration |
 | `--timeout` | `300` | Per-iteration timeout in seconds |
 | `--max-budget` | `50.0` | Maximum total budget in USD |
@@ -128,7 +143,7 @@ Each project gets its own `.workflow/` state directory. You can run concurrent l
 
 ```bash
 # Terminal 1
-python loop_driver.py --project ~/projects/backend --model opus --verbose
+python loop_driver.py --project ~/projects/backend --model sonnet --verbose
 
 # Terminal 2
 python loop_driver.py --project ~/projects/frontend --model sonnet --verbose
@@ -171,7 +186,7 @@ The loop uses sensible defaults and works out of the box. For customization, cre
 }
 ```
 
-All fields are optional — unspecified values use defaults.
+All fields are optional — unspecified values use defaults. The `"model": "sonnet"` default is recommended for most workloads.
 
 ## Exit Codes
 
