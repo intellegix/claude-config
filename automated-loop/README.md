@@ -1,12 +1,12 @@
 # Intellegix Code Agent Toolkit
 
-A self-driving automation loop that pairs **Claude Code CLI** with **Perplexity research** to execute multi-step software engineering tasks autonomously. No API keys required — just a [Claude Code subscription](https://claude.ai/code).
+A self-driving automation loop that pairs **Claude Code CLI** with **Perplexity research automation** to execute multi-step software engineering tasks autonomously. No API keys required — just a [Claude Code subscription](https://claude.ai/code).
 
 ## Prerequisites
 
 - **Python 3.11+**
 - **Claude Code CLI** — installed via `npm install -g @anthropic-ai/claude-code` (requires a Max $20/mo or Team $100/mo subscription; no API key needed)
-- **Perplexity account** — free tier works; login session is cached via Playwright (no API key, $0/query)
+- **Perplexity account** — free tier works for research queries; login session is cached via Playwright (no API key, $0/query). Council automation (multi-model queries) requires a Perplexity subscription.
 
 ## Quick Start
 
