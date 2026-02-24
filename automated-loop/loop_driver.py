@@ -114,6 +114,11 @@ class LoopDriver:
         try:
             trace_path = self.project_path / ".workflow" / "trace.jsonl"
             trace_path.parent.mkdir(parents=True, exist_ok=True)
+            # Rotate if over limit
+            max_size = self.config.limits.trace_max_size_bytes
+            if max_size > 0 and trace_path.exists() and trace_path.stat().st_size > max_size:
+                rotated = trace_path.with_suffix(".jsonl.1")
+                trace_path.replace(rotated)
             with open(trace_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(event) + "\n")
         except Exception as e:
@@ -135,16 +140,58 @@ class LoopDriver:
                 capture_output=True, text=True, timeout=30,
             )
             if result.returncode != 0:
-                logger.error("Claude CLI preflight failed: %s", result.stderr[:200])
+                logger.error(
+                    "Claude CLI preflight failed: %s. "
+                    "Check: 1) claude --version works 2) No other claude process blocking "
+                    "3) Try: taskkill /F /IM claude.exe /T (Windows)",
+                    result.stderr[:200],
+                )
                 return False
             logger.info("Claude CLI preflight OK: %s", result.stdout.strip()[:100])
-            return True
         except FileNotFoundError:
-            logger.error("Claude CLI not found on PATH")
+            logger.error(
+                "Claude CLI not found on PATH. "
+                "Check: 1) claude --version works 2) No other claude process blocking "
+                "3) Try: taskkill /F /IM claude.exe /T (Windows)"
+            )
             return False
         except subprocess.TimeoutExpired:
-            logger.error("Claude CLI preflight timed out (30s)")
+            logger.error(
+                "Claude CLI preflight timed out (30s). "
+                "Check: 1) claude --version works 2) No other claude process blocking "
+                "3) Try: taskkill /F /IM claude.exe /T (Windows)"
+            )
             return False
+
+        # Run non-fatal project validation checks
+        warnings = self._preflight_project_checks()
+        for w in warnings:
+            logger.warning("Preflight: %s", w)
+
+        # Ensure .workflow/ is writable (fatal)
+        try:
+            workflow_dir = self.project_path / ".workflow"
+            workflow_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logger.error("Cannot create .workflow/ directory: %s", e)
+            return False
+
+        return True
+
+    def _preflight_project_checks(self) -> list[str]:
+        """Run non-fatal project validation checks. Returns list of warnings."""
+        warnings: list[str] = []
+        if not (self.project_path / "CLAUDE.md").exists():
+            warnings.append("No CLAUDE.md found — Claude may lack project context")
+        if not (self.project_path / ".git").exists():
+            warnings.append("Not a git repo — session continuity features limited")
+        # Perplexity session freshness
+        session = Path.home() / ".claude" / "config" / "playwright-session.json"
+        if not session.exists():
+            warnings.append("No Perplexity session — research queries will fail")
+        elif (time.time() - session.stat().st_mtime) > 86400:
+            warnings.append("Perplexity session >24h old — may need refresh")
+        return warnings
 
     def run(self) -> int:
         """Execute the main loop. Returns exit code."""
@@ -236,6 +283,7 @@ class LoopDriver:
             self.tracker.add_cycle(
                 prompt=current_prompt,
                 session_id=session_id,
+                model=self.config.claude.model,
                 cost_usd=cost_usd,
                 duration_ms=duration_ms,
                 num_turns=num_turns,
@@ -262,7 +310,11 @@ class LoopDriver:
                 total_limit=self.config.limits.max_total_budget_usd,
             )
             if not budget_check.success:
-                logger.error("Budget exceeded: %s", budget_check.error)
+                logger.error(
+                    "Budget exceeded: %s. Completed %d iterations. "
+                    "Review .workflow/metrics_summary.json for cost breakdown.",
+                    budget_check.error, i,
+                )
                 self._write_trace_event("budget_exceeded", error=budget_check.error)
                 self.tracker.fail(budget_check.error or "Budget exceeded")
                 self.tracker.save()
@@ -340,7 +392,10 @@ class LoopDriver:
                 if self._consecutive_timeouts >= max_timeouts:
                     reason = (
                         f"Stagnation: {self._consecutive_timeouts} consecutive timeouts "
-                        f"(limit: {max_timeouts})"
+                        f"(limit: {max_timeouts}). "
+                        f"Recovery: 1) Review CLAUDE.md for unclear instructions "
+                        f"2) Try --model opus for complex tasks "
+                        f"3) Increase --timeout for large codebases"
                     )
                     logger.error(reason)
                     self._write_trace_event("stagnation_exit", reason=reason)
@@ -415,7 +470,10 @@ class LoopDriver:
                 else:
                     # Already reset once — exit gracefully
                     logger.error(
-                        "Stagnation persists after session reset: %s",
+                        "Stagnation persists after session reset: %s. "
+                        "Recovery: 1) Review CLAUDE.md for unclear instructions "
+                        "2) Try --model opus for complex tasks "
+                        "3) Increase --timeout for large codebases",
                         stagnation_check.error,
                     )
                     self._write_trace_event(
@@ -810,6 +868,7 @@ class LoopDriver:
     def _write_metrics_summary(self, exit_code: int) -> None:
         """Write a metrics summary JSON file on loop completion."""
         metrics = self.tracker.get_metrics()
+        analytics = self.tracker.compute_model_analytics()
         summary = {
             "exit_code": exit_code,
             "status": self.tracker.state.status,
@@ -818,6 +877,7 @@ class LoopDriver:
             "total_turns": metrics.total_turns,
             "error_count": metrics.error_count,
             "total_duration_ms": metrics.total_duration_ms,
+            "model_analytics": {k: v.model_dump() for k, v in analytics.items()},
         }
         path = self.project_path / ".workflow" / "metrics_summary.json"
         try:

@@ -1461,3 +1461,295 @@ class TestComputeCooldown:
         config.limits.timeout_cooldown_base_seconds = 0
         driver = LoopDriver(project_dir, config, dry_run=True, skip_preflight=True)
         assert driver._compute_cooldown(5) == 0
+
+
+class TestTraceLogRotation:
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_trace_rotates_when_over_limit(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """trace.jsonl rotates to .jsonl.1 when exceeding configured size."""
+        trace_path = project_dir / ".workflow" / "trace.jsonl"
+        trace_path.parent.mkdir(parents=True, exist_ok=True)
+        # Write enough data to exceed limit
+        trace_path.write_text("x" * 500, encoding="utf-8")
+        config.limits.trace_max_size_bytes = 100  # Very low limit
+
+        mock_popen.side_effect = make_popen_dispatcher(
+            claude_ndjson=build_ndjson_stream("s1", 0.01, 1, "PROJECT_COMPLETE"),
+        )
+        mock_run.side_effect = make_subprocess_dispatcher()
+
+        driver = LoopDriver(project_dir, config)
+        driver.run()
+
+        rotated = trace_path.with_suffix(".jsonl.1")
+        assert rotated.exists()
+        # New trace.jsonl should exist with fresh events
+        assert trace_path.exists()
+        assert trace_path.stat().st_size < 500  # Smaller than original
+
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_trace_rotation_replaces_existing_backup(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """Rotation replaces existing .jsonl.1 file."""
+        trace_path = project_dir / ".workflow" / "trace.jsonl"
+        trace_path.parent.mkdir(parents=True, exist_ok=True)
+        trace_path.write_text("new_data_" * 100, encoding="utf-8")
+        rotated = trace_path.with_suffix(".jsonl.1")
+        rotated.write_text("old_backup", encoding="utf-8")
+        config.limits.trace_max_size_bytes = 100
+
+        mock_popen.side_effect = make_popen_dispatcher(
+            claude_ndjson=build_ndjson_stream("s1", 0.01, 1, "PROJECT_COMPLETE"),
+        )
+        mock_run.side_effect = make_subprocess_dispatcher()
+
+        driver = LoopDriver(project_dir, config)
+        driver.run()
+
+        assert rotated.exists()
+        assert "old_backup" not in rotated.read_text(encoding="utf-8")
+
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_trace_no_rotation_when_zero(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """trace_max_size_bytes=0 disables rotation."""
+        trace_path = project_dir / ".workflow" / "trace.jsonl"
+        trace_path.parent.mkdir(parents=True, exist_ok=True)
+        trace_path.write_text("x" * 500, encoding="utf-8")
+        config.limits.trace_max_size_bytes = 0
+
+        mock_popen.side_effect = make_popen_dispatcher(
+            claude_ndjson=build_ndjson_stream("s1", 0.01, 1, "PROJECT_COMPLETE"),
+        )
+        mock_run.side_effect = make_subprocess_dispatcher()
+
+        driver = LoopDriver(project_dir, config)
+        driver.run()
+
+        rotated = trace_path.with_suffix(".jsonl.1")
+        assert not rotated.exists()
+
+
+class TestExtendedPreflightChecks:
+    @patch("subprocess.run")
+    def test_preflight_warns_missing_claude_md(
+        self, mock_run: MagicMock, tmp_path: Path, config: WorkflowConfig, caplog,
+    ) -> None:
+        """Preflight warns when CLAUDE.md is missing."""
+        (tmp_path / ".workflow").mkdir()
+        mock_run.return_value = MagicMock(returncode=0, stdout="claude 1.0.0\n", stderr="")
+
+        driver = LoopDriver(tmp_path, config, dry_run=True)
+        with caplog.at_level(logging.WARNING):
+            result = driver._preflight_check()
+
+        assert result is True
+        assert any("No CLAUDE.md" in r.message for r in caplog.records)
+
+    @patch("subprocess.run")
+    def test_preflight_warns_not_git_repo(
+        self, mock_run: MagicMock, tmp_path: Path, config: WorkflowConfig, caplog,
+    ) -> None:
+        """Preflight warns when .git/ doesn't exist."""
+        (tmp_path / ".workflow").mkdir()
+        (tmp_path / "CLAUDE.md").write_text("# Project", encoding="utf-8")
+        mock_run.return_value = MagicMock(returncode=0, stdout="claude 1.0.0\n", stderr="")
+
+        driver = LoopDriver(tmp_path, config, dry_run=True)
+        with caplog.at_level(logging.WARNING):
+            driver._preflight_check()
+
+        assert any("Not a git repo" in r.message for r in caplog.records)
+
+    @patch("subprocess.run")
+    def test_preflight_no_warnings_when_all_present(
+        self, mock_run: MagicMock, tmp_path: Path, config: WorkflowConfig, caplog,
+    ) -> None:
+        """Preflight logs no warnings when all checks pass."""
+        (tmp_path / ".workflow").mkdir()
+        (tmp_path / "CLAUDE.md").write_text("# Project", encoding="utf-8")
+        (tmp_path / ".git").mkdir()
+        mock_run.return_value = MagicMock(returncode=0, stdout="claude 1.0.0\n", stderr="")
+
+        driver = LoopDriver(tmp_path, config, dry_run=True)
+        with caplog.at_level(logging.WARNING):
+            result = driver._preflight_check()
+
+        assert result is True
+        preflight_warnings = [r for r in caplog.records if "Preflight:" in r.message]
+        # May have Perplexity session warning, but no CLAUDE.md or git warnings
+        no_project_warnings = [
+            r for r in preflight_warnings
+            if "CLAUDE.md" in r.message or "git repo" in r.message
+        ]
+        assert len(no_project_warnings) == 0
+
+    @patch("subprocess.run")
+    def test_preflight_creates_workflow_dir(
+        self, mock_run: MagicMock, tmp_path: Path, config: WorkflowConfig,
+    ) -> None:
+        """Preflight creates .workflow/ directory if it doesn't exist."""
+        (tmp_path / "CLAUDE.md").write_text("# Project", encoding="utf-8")
+        mock_run.return_value = MagicMock(returncode=0, stdout="claude 1.0.0\n", stderr="")
+
+        driver = LoopDriver(tmp_path, config, dry_run=True)
+        result = driver._preflight_check()
+
+        assert result is True
+        assert (tmp_path / ".workflow").exists()
+
+
+class TestModelAnalyticsInMetrics:
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_metrics_summary_includes_model_analytics(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """Metrics summary JSON includes per-model analytics."""
+        mock_popen.side_effect = make_popen_dispatcher(
+            claude_ndjson=build_ndjson_stream("s1", 0.05, 2, "PROJECT_COMPLETE"),
+        )
+        mock_run.side_effect = make_subprocess_dispatcher()
+
+        driver = LoopDriver(project_dir, config)
+        exit_code = driver.run()
+        assert exit_code == EXIT_COMPLETE
+
+        summary_path = project_dir / ".workflow" / "metrics_summary.json"
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        assert "model_analytics" in summary
+        assert "sonnet" in summary["model_analytics"]  # default model
+        sonnet_stats = summary["model_analytics"]["sonnet"]
+        assert sonnet_stats["iterations"] == 1
+        assert sonnet_stats["avg_turns"] == 2.0
+        assert sonnet_stats["avg_cost_usd"] == pytest.approx(0.05)
+
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_model_analytics_with_fallback(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """Model analytics separates opus and sonnet cycles after fallback."""
+        config.limits.max_iterations = 5
+        config.claude.model = "opus"
+        config.stagnation.max_consecutive_timeouts = 2
+        call_count = [0]
+
+        def popen_side_effect(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get("args", [])
+            if isinstance(cmd, list) and cmd and cmd[0] == "claude":
+                call_count[0] += 1
+                if call_count[0] <= 2:
+                    return MockPopen("")  # Timeout (Opus)
+                return MockPopen(
+                    build_ndjson_stream(f"s{call_count[0]}", 0.05, 5, "PROJECT_COMPLETE")
+                )
+            return MockPopen("")
+
+        mock_popen.side_effect = popen_side_effect
+        mock_run.side_effect = make_subprocess_dispatcher(
+            research_result=mock_playwright_result(),
+        )
+
+        driver = LoopDriver(project_dir, config)
+        driver.run()
+
+        summary_path = project_dir / ".workflow" / "metrics_summary.json"
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        analytics = summary["model_analytics"]
+        # Opus had 2 timeout iterations, sonnet had 1 successful
+        assert "opus" in analytics
+        assert "sonnet" in analytics
+        assert analytics["opus"]["timeout_count"] == 2
+        assert analytics["sonnet"]["iterations"] >= 1
+
+
+class TestImprovedErrorMessages:
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_stagnation_error_has_recovery_steps(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig, caplog,
+    ) -> None:
+        """Stagnation exit error message includes actionable recovery steps."""
+        config.limits.max_iterations = 10
+        config.stagnation.window_size = 3
+        config.stagnation.low_turn_threshold = 2
+
+        mock_popen.side_effect = make_popen_dispatcher(
+            claude_ndjson=build_ndjson_stream("s1", 0.01, 1, "Thinking..."),
+        )
+        mock_run.side_effect = make_subprocess_dispatcher(
+            research_result=mock_playwright_result(),
+        )
+
+        driver = LoopDriver(project_dir, config)
+        with caplog.at_level(logging.ERROR):
+            driver.run()
+
+        assert any("Recovery:" in r.message for r in caplog.records)
+        assert any("CLAUDE.md" in r.message for r in caplog.records)
+
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_budget_error_has_iteration_count(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig, caplog,
+    ) -> None:
+        """Budget exceeded message includes iteration count and metrics reference."""
+        mock_popen.side_effect = make_popen_dispatcher(
+            claude_ndjson=build_ndjson_stream("s1", 10.0, 1, "Expensive"),
+        )
+        mock_run.side_effect = make_subprocess_dispatcher()
+
+        driver = LoopDriver(project_dir, config)
+        with caplog.at_level(logging.ERROR):
+            driver.run()
+
+        assert any("metrics_summary.json" in r.message for r in caplog.records)
+
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_timeout_stagnation_has_recovery_steps(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig, caplog,
+    ) -> None:
+        """Consecutive timeout stagnation includes recovery guidance."""
+        config.limits.max_iterations = 5
+        config.stagnation.max_consecutive_timeouts = 2
+
+        mock_popen.side_effect = make_popen_dispatcher(claude_ndjson="")
+        mock_run.side_effect = make_subprocess_dispatcher(
+            research_result=mock_playwright_result(),
+        )
+
+        driver = LoopDriver(project_dir, config)
+        with caplog.at_level(logging.ERROR):
+            driver.run()
+
+        assert any("Recovery:" in r.message for r in caplog.records)
+
+    @patch("subprocess.run")
+    def test_preflight_failure_has_recovery_steps(
+        self, mock_run: MagicMock, project_dir: Path, config: WorkflowConfig, caplog,
+    ) -> None:
+        """Preflight failure includes actionable recovery guidance."""
+        mock_run.side_effect = FileNotFoundError("claude not found")
+
+        driver = LoopDriver(project_dir, config, dry_run=True)
+        with caplog.at_level(logging.ERROR):
+            driver._preflight_check()
+
+        assert any("taskkill" in r.message for r in caplog.records)

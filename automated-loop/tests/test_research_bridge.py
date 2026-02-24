@@ -388,3 +388,22 @@ class TestRetryAndCircuitBreaker:
         result = bridge.query()
         assert result.success
         assert bridge._consecutive_failures == 0
+
+    @patch("research_bridge.subprocess.run")
+    def test_circuit_breaker_error_message_has_recovery_steps(
+        self, mock_run: MagicMock, research_project_dir: Path, fast_retry_config: RetryConfig
+    ) -> None:
+        """Circuit breaker error message includes actionable recovery guidance."""
+        mock_run.side_effect = make_research_dispatcher(
+            playwright_side_effect=sp.TimeoutExpired(cmd="python", timeout=600)
+        )
+
+        bridge = ResearchBridge(
+            research_project_dir, retry_config=fast_retry_config
+        )
+        bridge.query()  # Trip the breaker
+
+        result = bridge.query()
+        assert result.error_code == "CIRCUIT_OPEN"
+        assert "playwright-session.json" in result.error
+        assert "council_browser.py" in result.error
