@@ -260,6 +260,57 @@ class TestTraceRotationConfig:
             WorkflowConfig(limits={"trace_max_size_bytes": -1})
 
 
+class TestExplorationConfig:
+    def test_exploration_defaults(self) -> None:
+        from config import ExplorationConfig
+        cfg = ExplorationConfig()
+        assert cfg.enabled is True
+        assert cfg.max_files_to_read == 10
+        assert cfg.max_chars_per_file == 3000
+
+    def test_exploration_in_workflow_config(self) -> None:
+        config = WorkflowConfig()
+        assert config.exploration.enabled is True
+        assert config.exploration.max_files_to_read == 10
+
+    def test_exploration_custom_values(self) -> None:
+        config = WorkflowConfig(
+            exploration={"max_files_to_read": 20, "max_chars_per_file": 5000}
+        )
+        assert config.exploration.max_files_to_read == 20
+        assert config.exploration.max_chars_per_file == 5000
+
+    def test_exploration_validation_rejects_bad_values(self) -> None:
+        with pytest.raises(Exception):
+            WorkflowConfig(exploration={"max_files_to_read": 0})  # ge=1
+        with pytest.raises(Exception):
+            WorkflowConfig(exploration={"max_chars_per_file": 100})  # ge=500
+
+
+class TestVerificationConfig:
+    def test_verification_defaults(self) -> None:
+        from config import VerificationConfig
+        cfg = VerificationConfig()
+        assert cfg.enabled is True
+        assert cfg.verification_timeout_seconds == 600
+
+    def test_verification_in_workflow_config(self) -> None:
+        config = WorkflowConfig()
+        assert config.verification.enabled is True
+        assert config.verification.verification_timeout_seconds == 600
+
+    def test_verification_custom_values(self) -> None:
+        config = WorkflowConfig(
+            verification={"enabled": False, "verification_timeout_seconds": 300}
+        )
+        assert config.verification.enabled is False
+        assert config.verification.verification_timeout_seconds == 300
+
+    def test_verification_validation_rejects_bad_values(self) -> None:
+        with pytest.raises(Exception):
+            WorkflowConfig(verification={"verification_timeout_seconds": 30})  # ge=60
+
+
 class TestSessionRotationConfig:
     def test_session_rotation_defaults(self) -> None:
         from config import StagnationConfig

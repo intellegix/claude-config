@@ -122,6 +122,21 @@ class RetryConfig(BaseModel):
     circuit_breaker_reset_seconds: float = Field(default=120.0, gt=0)
 
 
+class ExplorationConfig(BaseModel):
+    """Codebase exploration settings before research queries."""
+
+    enabled: bool = Field(default=True)
+    max_files_to_read: int = Field(default=10, ge=1, le=30)
+    max_chars_per_file: int = Field(default=3000, ge=500, le=10000)
+
+
+class VerificationConfig(BaseModel):
+    """Plan verification settings."""
+
+    enabled: bool = Field(default=True)
+    verification_timeout_seconds: int = Field(default=600, ge=60)
+
+
 class StagnationConfig(BaseModel):
     """Diminishing returns detection to prevent runaway loops.
 
@@ -167,6 +182,8 @@ class WorkflowConfig(BaseModel):
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     retry: RetryConfig = Field(default_factory=RetryConfig)
     stagnation: StagnationConfig = Field(default_factory=StagnationConfig)
+    verification: VerificationConfig = Field(default_factory=VerificationConfig)
+    exploration: ExplorationConfig = Field(default_factory=ExplorationConfig)
 
 
 def load_config(config_path: str | Path) -> Result[WorkflowConfig]:

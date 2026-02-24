@@ -82,6 +82,8 @@ class LoopDriver:
             research_timeout=config.perplexity.research_timeout_seconds,
             headful=config.perplexity.headful,
             perplexity_mode=config.perplexity.perplexity_mode,
+            exploration_config=config.exploration,
+            verification_config=config.verification,
         )
 
     def _default_prompt(self) -> str:
@@ -524,6 +526,34 @@ class LoopDriver:
                 )
                 research_text = "Continue implementing the current plan."
 
+            # Plan verification: send research through Perplexity for critique
+            if (
+                self.config.verification.enabled
+                and research_result.success
+                and research_result.data
+            ):
+                logger.info("Running plan verification...")
+                self._write_trace_event("verification_start")
+                verification = self.bridge.verify_plan(
+                    plan_text=research_text,
+                    original_research=research_text,
+                    codebase_context=self.bridge.last_codebase_context,
+                )
+                self._write_trace_event(
+                    "verification_complete",
+                    success=verification.success,
+                )
+                if verification.success and verification.data:
+                    research_text = self._merge_research_and_verification(
+                        research_text, verification.data.response
+                    )
+                    logger.info("Verification critique merged into prompt")
+                else:
+                    logger.warning(
+                        "Verification failed [%s]: %s — using unverified research",
+                        verification.error_code, verification.error,
+                    )
+
             current_prompt = self._build_next_prompt(research_text)
             logger.info("Next prompt built (%d chars)", len(current_prompt))
 
@@ -844,6 +874,15 @@ class LoopDriver:
             if re.search(re.escape(marker), text, re.IGNORECASE):
                 return True
         return False
+
+    def _merge_research_and_verification(
+        self, research: str, verification: str
+    ) -> str:
+        """Merge research results with verification critique."""
+        return (
+            f"{research}\n\n---\n## Plan Verification Critique\n\n"
+            f"{verification}\n\nIMPORTANT: Address issues above before implementing."
+        )
 
     def _build_next_prompt(self, research_response: str) -> str:
         """Format research results into the next Claude prompt."""
