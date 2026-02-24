@@ -90,6 +90,7 @@ DIRECT_TIMEOUT = 60  # seconds per direct provider call
 # Headful by default — Cloudflare blocks headless Chromium on perplexity.ai.
 # Playwright headful runs in the background and doesn't need user interaction.
 BROWSER_HEADLESS = False
+BROWSER_HEADLESS_FALLBACK = False  # Try headless first, fall back to headful on Cloudflare
 BROWSER_TIMEOUT = 180_000  # ms, total timeout for council query
 BROWSER_RESEARCH_TIMEOUT = 480_000  # ms, deep research can take up to 7 min
 BROWSER_LABS_TIMEOUT = 840_000  # ms, labs mode — 14 min (1 min buffer under 15 min MCP timeout)
