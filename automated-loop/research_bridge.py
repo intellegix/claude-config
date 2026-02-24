@@ -20,7 +20,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from config import Result, RetryConfig, SecurityConfig
+from config import ExplorationConfig, Result, RetryConfig, SecurityConfig, VerificationConfig
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +88,75 @@ class SessionContext:
 
         return ctx
 
+    def explore_codebase(
+        self, max_files: int = 10, max_chars: int = 3000
+    ) -> dict[str, str]:
+        """Read key project files for research context.
+
+        Strategy: git diff --name-only HEAD~5 HEAD for recently changed files,
+        plus structural files (README.md, pyproject.toml, setup.py, etc.)
+        Falls back to globbing *.py / *.ts in project root if not a git repo.
+        Skips files >50KB and binary files.
+        """
+        SKIP_PATTERNS = {
+            ".git", "__pycache__", "node_modules", ".venv", "venv",
+            ".mypy_cache", ".pytest_cache", "dist", "build", ".egg-info",
+        }
+        STRUCTURAL_FILES = [
+            "README.md", "pyproject.toml", "setup.py", "setup.cfg",
+            "package.json", "tsconfig.json", "Makefile", "requirements.txt",
+        ]
+        MAX_FILE_SIZE = 50_000  # Skip files >50KB
+
+        files_to_read: list[Path] = []
+
+        # 1. Recently changed files via git
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--name-only", "HEAD~5", "HEAD"],
+                cwd=str(self.project_path),
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                for name in result.stdout.strip().splitlines():
+                    p = self.project_path / name
+                    if p.exists() and p.is_file():
+                        files_to_read.append(p)
+        except (subprocess.SubprocessError, FileNotFoundError):
+            pass
+
+        # 2. Structural files
+        for name in STRUCTURAL_FILES:
+            p = self.project_path / name
+            if p.exists() and p not in files_to_read:
+                files_to_read.append(p)
+
+        # 3. Fallback: glob for source files if no git results
+        if not files_to_read:
+            for pattern in ("*.py", "*.ts", "*.js"):
+                for p in self.project_path.glob(pattern):
+                    if p.is_file() and p not in files_to_read:
+                        files_to_read.append(p)
+
+        # Filter and read
+        result_files: dict[str, str] = {}
+        for p in files_to_read[:max_files]:
+            # Skip files in ignored directories
+            if any(skip in p.parts for skip in SKIP_PATTERNS):
+                continue
+            try:
+                if p.stat().st_size > MAX_FILE_SIZE:
+                    continue
+                content = p.read_text(encoding="utf-8", errors="replace")
+                relative = str(p.relative_to(self.project_path))
+                result_files[relative] = content[:max_chars]
+            except (OSError, ValueError):
+                continue
+
+        return result_files
+
     def _get_git_log(self) -> Optional[str]:
         """Get recent git log, returns None if not a git repo."""
         try:
@@ -105,6 +174,32 @@ class SessionContext:
         return None
 
 
+VERIFICATION_PROMPT = """You are a senior code reviewer validating an implementation plan.
+
+ORIGINAL RESEARCH RECOMMENDATIONS:
+{original_research}
+
+PROPOSED PLAN:
+{plan_text}
+
+CODEBASE CONTEXT:
+{codebase_summary}
+
+Critically evaluate this plan for:
+1. LOGICAL ERRORS: Contradictions with research or codebase
+2. MISSING EDGE CASES: What could go wrong that isn't addressed
+3. FILE PATH ACCURACY: Do referenced files match the codebase
+4. DEPENDENCY ORDERING: Are phase prerequisites correct
+5. SCOPE CREEP: Work not supported by the research
+6. FEASIBILITY: Is the plan realistic given the codebase state
+
+Respond with:
+- VERDICT: APPROVED | NEEDS_REVISION | MAJOR_ISSUES
+- ISSUES: Numbered list of problems
+- SUGGESTIONS: Concrete fixes
+- RISK_ASSESSMENT: Highest-risk element
+"""
+
 # Error codes that are transient and worth retrying
 RETRYABLE_ERRORS = {"TIMEOUT", "PLAYWRIGHT_ERROR", "PARSE_ERROR"}
 
@@ -119,6 +214,8 @@ class ResearchBridge:
         research_timeout: int = 600,
         headful: bool = True,
         perplexity_mode: str = "research",
+        exploration_config: Optional[ExplorationConfig] = None,
+        verification_config: Optional[VerificationConfig] = None,
     ) -> None:
         self.project_path = Path(project_path)
         self.context = SessionContext(project_path)
@@ -126,12 +223,21 @@ class ResearchBridge:
         self.research_timeout = research_timeout
         self.headful = headful
         self.perplexity_mode = perplexity_mode
+        self.exploration_config = exploration_config or ExplorationConfig()
+        self.verification_config = verification_config or VerificationConfig()
 
         # Circuit breaker state
         self._consecutive_failures: int = 0
         self._last_failure_time: float = 0.0
 
-    def build_query(self, extra_context: Optional[str] = None) -> str:
+        # Last codebase context for reuse in verification
+        self.last_codebase_context: Optional[dict[str, str]] = None
+
+    def build_query(
+        self,
+        extra_context: Optional[str] = None,
+        codebase_context: Optional[dict[str, str]] = None,
+    ) -> str:
         """Build a structured research query from project context."""
         ctx = self.context.gather()
 
@@ -161,6 +267,13 @@ class ResearchBridge:
             parts.append("## Previous Research Result")
             parts.append(ctx["last_research"])
             parts.append("")
+
+        if codebase_context:
+            parts.append("## Key Codebase Files")
+            for filepath, content in codebase_context.items():
+                parts.append(f"### {filepath}")
+                parts.append(f"```\n{content}\n```")
+                parts.append("")
 
         if extra_context:
             parts.append("## Additional Context")
@@ -225,10 +338,26 @@ class ResearchBridge:
                 "CIRCUIT_OPEN",
             )
 
+        # Explore codebase for context before building query
+        codebase_context: Optional[dict[str, str]] = None
+        if self.exploration_config.enabled:
+            codebase_context = self.context.explore_codebase(
+                max_files=self.exploration_config.max_files_to_read,
+                max_chars=self.exploration_config.max_chars_per_file,
+            )
+            self.last_codebase_context = codebase_context
+            if codebase_context:
+                logger.info(
+                    "Explored %d codebase files for research context",
+                    len(codebase_context),
+                )
+
         last_result: Result[ResearchResult] = Result.fail("No attempts made", "UNKNOWN")
 
         for attempt in range(self.retry_config.max_retries + 1):
-            last_result = self._single_query(extra_context)
+            last_result = self._single_query(
+                extra_context, codebase_context=codebase_context
+            )
 
             if last_result.success:
                 self._record_success()
@@ -254,9 +383,13 @@ class ResearchBridge:
 
         return last_result
 
-    def _single_query(self, extra_context: Optional[str] = None) -> Result[ResearchResult]:
+    def _single_query(
+        self,
+        extra_context: Optional[str] = None,
+        codebase_context: Optional[dict[str, str]] = None,
+    ) -> Result[ResearchResult]:
         """Execute a single research query via Playwright browser automation (no retry)."""
-        query_text = self.build_query(extra_context)
+        query_text = self.build_query(extra_context, codebase_context=codebase_context)
 
         try:
             cmd = [
@@ -313,6 +446,85 @@ class ResearchBridge:
             )
         except Exception as e:
             return Result.fail(f"Research query failed: {e}", "QUERY_ERROR")
+
+    def verify_plan(
+        self,
+        plan_text: str,
+        original_research: str,
+        codebase_context: Optional[dict[str, str]] = None,
+    ) -> Result[ResearchResult]:
+        """Send a plan through Perplexity for verification critique.
+
+        Reuses _single_query() with the verification prompt template.
+        """
+        codebase_summary = "(no codebase context available)"
+        if codebase_context:
+            parts = []
+            for filepath, content in codebase_context.items():
+                parts.append(f"### {filepath}\n```\n{content[:1000]}\n```")
+            codebase_summary = "\n".join(parts)
+
+        verification_query = VERIFICATION_PROMPT.format(
+            original_research=original_research[:3000],
+            plan_text=plan_text[:5000],
+            codebase_summary=codebase_summary[:5000],
+        )
+
+        # Use _single_query with the verification prompt as extra_context
+        # but override the query text entirely via a direct subprocess call
+        timeout = self.verification_config.verification_timeout_seconds
+
+        try:
+            cmd = [
+                sys.executable, str(COUNCIL_BROWSER_SCRIPT),
+                "--perplexity-mode", self.perplexity_mode,
+                verification_query,
+            ]
+            if self.headful:
+                cmd.insert(2, "--headful")
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+
+            if result.returncode != 0:
+                stderr = result.stderr.strip() if result.stderr else "Unknown error"
+                return Result.fail(
+                    f"Verification subprocess failed (exit {result.returncode}): {stderr}",
+                    "PLAYWRIGHT_ERROR",
+                )
+
+            data = json.loads(result.stdout)
+
+            if data.get("error"):
+                return Result.fail(data["error"], "PLAYWRIGHT_ERROR")
+
+            content = data.get("synthesis", "")
+            if not content:
+                return Result.fail("Empty verification response", "PARSE_ERROR")
+
+            return Result.ok(ResearchResult(
+                query=verification_query[:500],
+                response=content,
+                model=f"perplexity-{self.perplexity_mode}-verification",
+            ))
+
+        except subprocess.TimeoutExpired:
+            return Result.fail(
+                f"Verification timed out ({timeout}s)", "TIMEOUT"
+            )
+        except json.JSONDecodeError as e:
+            return Result.fail(f"Invalid JSON from verification: {e}", "PARSE_ERROR")
+        except FileNotFoundError:
+            return Result.fail(
+                f"council_browser.py not found at {COUNCIL_BROWSER_SCRIPT}",
+                "SCRIPT_NOT_FOUND",
+            )
+        except Exception as e:
+            return Result.fail(f"Verification failed: {e}", "QUERY_ERROR")
 
     def _save_result(self, result: ResearchResult) -> None:
         """Save research result to .workflow/research_result.md."""

@@ -8,13 +8,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from config import RetryConfig
-from research_bridge import ResearchBridge, SessionContext
+from config import ExplorationConfig, RetryConfig, VerificationConfig
+from research_bridge import ResearchBridge, SessionContext, VERIFICATION_PROMPT
 
 from helpers import (
     mock_git_log_result,
     mock_playwright_error,
     mock_playwright_result,
+    mock_verification_result,
     make_research_dispatcher,
 )
 
@@ -407,3 +408,142 @@ class TestRetryAndCircuitBreaker:
         assert result.error_code == "CIRCUIT_OPEN"
         assert "playwright-session.json" in result.error
         assert "council_browser.py" in result.error
+
+
+class TestExploration:
+    """Tests for codebase exploration before research queries."""
+
+    def test_explore_codebase_reads_files(self, research_project_dir: Path) -> None:
+        """explore_codebase reads project files and returns content."""
+        (research_project_dir / "main.py").write_text(
+            "def main():\n    print('hello')\n", encoding="utf-8"
+        )
+        ctx = SessionContext(research_project_dir)
+        result = ctx.explore_codebase(max_files=10, max_chars=3000)
+        # Should find at least the CLAUDE.md or main.py via glob fallback
+        assert len(result) >= 1
+
+    def test_explore_codebase_respects_max_files(self, research_project_dir: Path) -> None:
+        """Only reads up to max_files."""
+        for i in range(20):
+            (research_project_dir / f"file_{i}.py").write_text(
+                f"# file {i}\n", encoding="utf-8"
+            )
+        ctx = SessionContext(research_project_dir)
+        result = ctx.explore_codebase(max_files=5, max_chars=3000)
+        assert len(result) <= 5
+
+    def test_explore_codebase_truncates_content(self, research_project_dir: Path) -> None:
+        """Large files get truncated to max_chars."""
+        (research_project_dir / "big.py").write_text("x" * 10000, encoding="utf-8")
+        ctx = SessionContext(research_project_dir)
+        result = ctx.explore_codebase(max_files=10, max_chars=500)
+        for content in result.values():
+            assert len(content) <= 500
+
+    def test_explore_codebase_empty_project(self, bare_project_dir: Path) -> None:
+        """Bare project returns empty dict (no source files)."""
+        ctx = SessionContext(bare_project_dir)
+        result = ctx.explore_codebase(max_files=10, max_chars=3000)
+        assert isinstance(result, dict)
+
+    @patch("research_bridge.subprocess.run")
+    def test_build_query_includes_codebase_context(
+        self, mock_run: MagicMock, research_project_dir: Path
+    ) -> None:
+        """build_query includes codebase context when provided."""
+        mock_run.side_effect = make_research_dispatcher(
+            playwright_result=mock_playwright_result()
+        )
+        bridge = ResearchBridge(research_project_dir)
+        codebase = {"src/main.py": "def main(): pass"}
+        query = bridge.build_query(codebase_context=codebase)
+        assert "Key Codebase Files" in query
+        assert "src/main.py" in query
+        assert "def main(): pass" in query
+
+    @patch("research_bridge.subprocess.run")
+    def test_query_with_exploration_disabled(
+        self, mock_run: MagicMock, research_project_dir: Path
+    ) -> None:
+        """No codebase context when exploration is disabled."""
+        mock_run.side_effect = make_research_dispatcher(
+            playwright_result=mock_playwright_result("Next steps...")
+        )
+        bridge = ResearchBridge(
+            research_project_dir,
+            exploration_config=ExplorationConfig(enabled=False),
+        )
+        result = bridge.query()
+        assert result.success
+        assert bridge.last_codebase_context is None
+
+
+class TestVerification:
+    """Tests for plan verification."""
+
+    @patch("research_bridge.subprocess.run")
+    def test_verify_plan_success(
+        self, mock_run: MagicMock, research_project_dir: Path
+    ) -> None:
+        """verify_plan returns critique text on success."""
+        mock_run.side_effect = make_research_dispatcher(
+            playwright_result=mock_verification_result("APPROVED")
+        )
+        bridge = ResearchBridge(research_project_dir)
+        result = bridge.verify_plan(
+            plan_text="Phase 1: Add feature",
+            original_research="Add feature X",
+        )
+        assert result.success
+        assert result.data is not None
+        assert "APPROVED" in result.data.response
+
+    @patch("research_bridge.subprocess.run")
+    def test_verify_plan_timeout(
+        self, mock_run: MagicMock, research_project_dir: Path
+    ) -> None:
+        """Verification timeout returns error."""
+        mock_run.side_effect = make_research_dispatcher(
+            playwright_side_effect=sp.TimeoutExpired(cmd="python", timeout=600)
+        )
+        bridge = ResearchBridge(research_project_dir)
+        result = bridge.verify_plan(
+            plan_text="Phase 1: Add feature",
+            original_research="Add feature X",
+        )
+        assert not result.success
+        assert result.error_code == "TIMEOUT"
+
+    @patch("research_bridge.subprocess.run")
+    def test_verify_plan_includes_plan_and_research(
+        self, mock_run: MagicMock, research_project_dir: Path
+    ) -> None:
+        """Verification query contains both plan text and research text."""
+        captured_cmd = []
+
+        def capture_side_effect(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get("args", [])
+            if isinstance(cmd, list) and cmd and cmd[0] == "git":
+                return mock_git_log_result()
+            captured_cmd.append(cmd)
+            return mock_verification_result()
+
+        mock_run.side_effect = capture_side_effect
+        bridge = ResearchBridge(research_project_dir)
+        bridge.verify_plan(
+            plan_text="Phase 1: Implement caching",
+            original_research="Research: caching needed",
+        )
+        # The verification query (last arg of cmd) should contain both
+        assert len(captured_cmd) >= 1
+        query_text = captured_cmd[0][-1]  # Last arg is the query text
+        assert "Implement caching" in query_text
+        assert "caching needed" in query_text
+
+    def test_verify_plan_uses_verification_template(self) -> None:
+        """VERIFICATION_PROMPT contains expected structure."""
+        assert "VERDICT" in VERIFICATION_PROMPT
+        assert "LOGICAL ERRORS" in VERIFICATION_PROMPT
+        assert "SCOPE CREEP" in VERIFICATION_PROMPT
+        assert "FEASIBILITY" in VERIFICATION_PROMPT

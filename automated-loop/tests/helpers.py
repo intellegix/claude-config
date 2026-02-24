@@ -59,6 +59,28 @@ def mock_playwright_result(synthesis: str = "Keep going") -> MagicMock:
     )
 
 
+def mock_verification_result(
+    verdict: str = "APPROVED", issues: str = "None"
+) -> MagicMock:
+    """Build a mock subprocess result for plan verification."""
+    synthesis = (
+        f"VERDICT: {verdict}\n"
+        f"ISSUES: {issues}\n"
+        f"SUGGESTIONS: None\n"
+        f"RISK_ASSESSMENT: Low risk overall"
+    )
+    return MagicMock(
+        returncode=0,
+        stdout=json.dumps({
+            "synthesis": synthesis,
+            "models": ["perplexity-research-verification"],
+            "citations": [],
+            "execution_time_ms": 20000,
+        }),
+        stderr="",
+    )
+
+
 def mock_playwright_error(error: str = "Browser timeout") -> MagicMock:
     """Build a mock subprocess result for Playwright error."""
     return MagicMock(
@@ -117,16 +139,31 @@ def make_subprocess_dispatcher(
     return side_effect
 
 
-def make_research_dispatcher(playwright_result=None, playwright_side_effect=None):
+def make_research_dispatcher(
+    playwright_result=None,
+    playwright_side_effect=None,
+    verification_result=None,
+    verification_side_effect=None,
+):
     """Create a subprocess.run mock for research bridge tests.
 
     Git log calls get a no-op result. Council browser calls get playwright_result
-    or raise playwright_side_effect.
+    or raise playwright_side_effect. If verification_result is provided, second
+    council_browser call (verification) returns it instead.
     """
+    call_count = [0]
+
     def side_effect(*args, **kwargs):
         cmd = args[0] if args else kwargs.get("args", [])
         if isinstance(cmd, list) and cmd and cmd[0] == "git":
             return mock_git_log_result()
+        # Council browser call
+        call_count[0] += 1
+        # If verification_result provided, second call is verification
+        if verification_result is not None and call_count[0] >= 2:
+            if verification_side_effect is not None:
+                raise verification_side_effect
+            return verification_result
         if playwright_side_effect is not None:
             raise playwright_side_effect
         return playwright_result

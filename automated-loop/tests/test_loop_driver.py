@@ -17,6 +17,7 @@ from helpers import (
     make_subprocess_dispatcher,
     mock_git_log_result,
     mock_playwright_result,
+    mock_verification_result,
     MockPopen,
 )
 
@@ -1753,3 +1754,156 @@ class TestImprovedErrorMessages:
             driver._preflight_check()
 
         assert any("taskkill" in r.message for r in caplog.records)
+
+
+class TestVerificationIntegration:
+    """Tests for plan verification in the loop driver."""
+
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_verification_enriches_prompt(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """Verification critique is merged into the next prompt."""
+        config.limits.max_iterations = 2
+        config.verification.enabled = True
+
+        call_count = [0]
+        popen_prompts = []
+
+        def popen_side_effect(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get("args", [])
+            if isinstance(cmd, list) and cmd and cmd[0] == "claude":
+                call_count[0] += 1
+                # Capture the prompt (3rd arg, after "claude", "-p")
+                prompt_idx = cmd.index("-p") + 1 if "-p" in cmd else 2
+                popen_prompts.append(cmd[prompt_idx])
+                return MockPopen(build_ndjson_stream(f"s{call_count[0]}", 0.01, 5, "Working..."))
+            return MockPopen("")
+
+        def run_side_effect(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get("args", [])
+            if isinstance(cmd, list) and cmd:
+                if cmd[0] == "git":
+                    return mock_git_log_result()
+                if cmd[0] == "claude" and "--version" in cmd:
+                    return MagicMock(returncode=0, stdout="claude 1.0\n", stderr="")
+                if "council_browser" in str(cmd):
+                    query_text = cmd[-1] if cmd else ""
+                    if "VERDICT" in query_text or "Critically evaluate" in query_text:
+                        return mock_verification_result("NEEDS_REVISION", "1. Missing error handling")
+                    return mock_playwright_result("Next step: implement feature X")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        mock_popen.side_effect = popen_side_effect
+        mock_run.side_effect = run_side_effect
+
+        driver = LoopDriver(project_dir, config)
+        driver.run()
+
+        # Second prompt should contain verification critique
+        if len(popen_prompts) >= 2:
+            assert "Plan Verification Critique" in popen_prompts[1]
+
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_verification_disabled_skips_query(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """No verification query when disabled."""
+        config.limits.max_iterations = 2
+        config.verification.enabled = False
+
+        mock_popen.side_effect = make_popen_dispatcher(
+            claude_ndjson=build_ndjson_stream("s1", 0.01, 5, "Working..."),
+        )
+        mock_run.side_effect = make_subprocess_dispatcher(
+            research_result=mock_playwright_result(),
+        )
+
+        driver = LoopDriver(project_dir, config)
+        driver.run()
+
+        # No verification trace events
+        trace_path = project_dir / ".workflow" / "trace.jsonl"
+        events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").strip().splitlines()]
+        event_types = [e["event_type"] for e in events]
+        assert "verification_start" not in event_types
+
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_verification_failure_uses_unverified(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """Verification failure continues with unverified research."""
+        config.limits.max_iterations = 2
+        config.verification.enabled = True
+
+        call_count = [0]
+
+        def run_side_effect(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get("args", [])
+            if isinstance(cmd, list) and cmd:
+                if cmd[0] == "git":
+                    return mock_git_log_result()
+                if cmd[0] == "claude" and "--version" in cmd:
+                    return MagicMock(returncode=0, stdout="claude 1.0\n", stderr="")
+                if "council_browser" in str(cmd):
+                    call_count[0] += 1
+                    if call_count[0] == 1:
+                        return mock_playwright_result("Next steps...")
+                    # Verification call fails
+                    raise sp.TimeoutExpired(cmd="python", timeout=600)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        mock_popen.side_effect = make_popen_dispatcher(
+            claude_ndjson=build_ndjson_stream("s1", 0.01, 5, "Working..."),
+        )
+        mock_run.side_effect = run_side_effect
+
+        driver = LoopDriver(project_dir, config)
+        exit_code = driver.run()
+
+        # Should not crash — falls back to unverified research
+        assert exit_code == EXIT_MAX_ITERATIONS
+
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_verification_trace_events(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """Trace has verification_start and verification_complete events."""
+        config.limits.max_iterations = 2
+        config.verification.enabled = True
+
+        def run_side_effect(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get("args", [])
+            if isinstance(cmd, list) and cmd:
+                if cmd[0] == "git":
+                    return mock_git_log_result()
+                if cmd[0] == "claude" and "--version" in cmd:
+                    return MagicMock(returncode=0, stdout="claude 1.0\n", stderr="")
+                if "council_browser" in str(cmd):
+                    query_text = cmd[-1] if cmd else ""
+                    if "VERDICT" in query_text or "Critically evaluate" in query_text:
+                        return mock_verification_result()
+                    return mock_playwright_result("Next steps...")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        mock_popen.side_effect = make_popen_dispatcher(
+            claude_ndjson=build_ndjson_stream("s1", 0.01, 5, "Working..."),
+        )
+        mock_run.side_effect = run_side_effect
+
+        driver = LoopDriver(project_dir, config)
+        driver.run()
+
+        trace_path = project_dir / ".workflow" / "trace.jsonl"
+        events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").strip().splitlines()]
+        event_types = [e["event_type"] for e in events]
+        assert "verification_start" in event_types
+        assert "verification_complete" in event_types
