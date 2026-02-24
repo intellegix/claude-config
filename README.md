@@ -36,7 +36,12 @@ A modular configuration system for Claude Code CLI. Includes an automated loop d
 │   ├── loop_driver.ps1        # PowerShell wrapper
 │   └── tests/                 # 220 pytest tests
 │
+├── hooks/                     # PreToolUse / session hooks
+│   ├── inject-time.py         # Time sync injection
+│   └── orchestrator-guard.py  # Orchestrator mode path guard
+│
 ├── commands/                  # Custom slash commands
+│   ├── orchestrator.md        # Multi-agent orchestration
 │   ├── research-perplexity.md # Deep research via Perplexity
 │   ├── smart-plan.md          # Multi-phase project planning
 │   ├── council-refine.md      # Multi-model plan refinement
@@ -278,6 +283,44 @@ Failed research queries automatically retry up to **3 times** with exponential b
 
 Transient Perplexity/Cloudflare issues are handled automatically — the loop continues even if research fails.
 
+### Orchestrator Mode
+
+When managing multiple projects, use `/orchestrator` to enforce role separation. The orchestrator writes CLAUDE.md instructions and launches loops — it never touches source code directly.
+
+#### Usage
+
+```bash
+# Activate for a project with a task
+/orchestrator C:\Projects\my-app Add user authentication
+
+# Check current status
+/orchestrator status
+
+# Deactivate
+/orchestrator off
+```
+
+#### How It Works
+
+1. **Sentinel file**: Activation creates `.workflow/orchestrator-mode.json` in the target project (24-hour expiration for crash recovery)
+2. **PreToolUse hook**: `~/.claude/hooks/orchestrator-guard.py` fires on every Read/Edit/Write/Grep/Glob/Bash call. If a sentinel is active, it blocks access to source code files while allowing CLAUDE.md, BLUEPRINT.md, markdown, and `.workflow/` files
+3. **4-phase workflow**: PLANNING (gather context, write CLAUDE.md) → LAUNCHING (start loop_driver.py) → MONITORING (10-min checks) → REPORTING (summarize results)
+4. **Persistent mode**: Stays active until `/orchestrator off` — supports multiple sequential tasks without reactivation
+
+#### Sentinel File Format
+
+```json
+{
+  "active": true,
+  "started": "2026-02-24T14:00:00",
+  "expires": "2026-02-25T14:00:00",
+  "project": "C:\\Projects\\my-app",
+  "orchestrator_cwd": "C:\\Users\\...\\automated claude"
+}
+```
+
+The hook is fail-open: if the sentinel is missing, expired, or malformed, all operations are allowed. Normal (non-orchestrator) sessions have zero overhead — the hook exits immediately when no sentinel is found.
+
 ### Custom Slash Commands
 
 Place in `~/.claude/commands/` and invoke from Claude Code with `/<command-name>`.
@@ -294,6 +337,7 @@ Place in `~/.claude/commands/` and invoke from Claude Code with `/<command-name>
 | `/handoff` | Agent-to-agent handoff documentation |
 | `/portfolio-status` | Portfolio-wide project status review |
 | `/cache-perplexity-session` | Refresh Perplexity browser session cookies |
+| `/orchestrator` | Multi-agent task orchestration with role enforcement |
 
 #### Authoring Custom Commands
 
