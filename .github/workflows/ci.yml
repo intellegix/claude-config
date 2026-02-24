@@ -34,4 +34,8 @@ jobs:
           pip install -r automated-loop/requirements.txt
 
       - name: Run tests
-        run: pytest automated-loop/tests/ -v
+        run: |
+          pytest automated-loop/tests/ -v \
+            --cov=automated-loop \
+            --cov-report=term-missing \
+            --cov-fail-under=60

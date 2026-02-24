@@ -99,25 +99,49 @@ def mock_git_log_result() -> MagicMock:
     return MagicMock(returncode=128, stdout="", stderr="not a git repo")
 
 
+def mock_git_diff_stat_result(
+    files_changed: int = 3, insertions: int = 50, deletions: int = 10,
+) -> MagicMock:
+    """Build a mock subprocess result for git diff --stat."""
+    summary = f" {files_changed} files changed, {insertions} insertions(+), {deletions} deletions(-)"
+    return MagicMock(returncode=0, stdout=f" file1.py | 10 +\n file2.py | 5 -\n{summary}\n", stderr="")
+
+
+def mock_test_result(passed: bool = True, stdout: str = "") -> MagicMock:
+    """Build a mock subprocess result for test command."""
+    return MagicMock(
+        returncode=0 if passed else 1,
+        stdout=stdout or ("5 passed" if passed else "2 failed, 3 passed"),
+        stderr="",
+    )
+
+
 def make_subprocess_dispatcher(
     claude_result=None,
     claude_side_effect=None,
     research_result=None,
     research_side_effect=None,
+    git_diff_result=None,
+    test_result=None,
 ):
     """Create a subprocess.run mock that dispatches based on command.
 
+    - git diff commands -> git_diff_result or mock_git_log_result()
     - git commands -> mock_git_log_result()
     - claude commands -> claude_result or raise claude_side_effect
     - council_browser commands -> research_result or raise research_side_effect
+    - pytest/test commands -> test_result or default pass
     """
     def side_effect(*args, **kwargs):
         cmd = args[0] if args else kwargs.get("args", [])
         if isinstance(cmd, list) and cmd:
             if cmd[0] == "git":
+                # Handle git diff --stat specifically
+                if len(cmd) >= 2 and cmd[1] == "diff" and git_diff_result is not None:
+                    return git_diff_result
+                # Handle preflight check (claude --version)
                 return mock_git_log_result()
             if cmd[0] == "claude":
-                # Handle preflight check (claude --version)
                 if len(cmd) >= 2 and cmd[1] == "--version":
                     return MagicMock(returncode=0, stdout="claude 1.0.0-test\n", stderr="")
                 if claude_side_effect is not None:
@@ -131,6 +155,9 @@ def make_subprocess_dispatcher(
                 if research_side_effect is not None:
                     raise research_side_effect
                 return research_result
+            # Test runner commands (pytest, python -m pytest, etc.)
+            if cmd[0] in ("pytest", "python") and test_result is not None:
+                return test_result
         # Default fallback
         if claude_result is not None:
             return claude_result

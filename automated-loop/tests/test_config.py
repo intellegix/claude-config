@@ -311,6 +311,45 @@ class TestVerificationConfig:
             WorkflowConfig(verification={"verification_timeout_seconds": 30})  # ge=60
 
 
+class TestValidationConfig:
+    def test_validation_defaults(self) -> None:
+        from config import ValidationConfig
+        cfg = ValidationConfig()
+        assert cfg.enabled is False
+        assert cfg.test_command == "pytest tests/ -v --tb=short"
+        assert cfg.test_timeout_seconds == 120
+        assert cfg.fail_action == "warn"
+        assert cfg.max_consecutive_failures == 3
+
+    def test_validation_in_workflow_config(self) -> None:
+        config = WorkflowConfig()
+        assert config.validation.enabled is False
+
+    def test_validation_custom_values(self) -> None:
+        config = WorkflowConfig(
+            validation={
+                "enabled": True,
+                "test_command": "python -m pytest -x",
+                "test_timeout_seconds": 300,
+                "fail_action": "inject",
+                "max_consecutive_failures": 5,
+            }
+        )
+        assert config.validation.enabled is True
+        assert config.validation.test_command == "python -m pytest -x"
+        assert config.validation.test_timeout_seconds == 300
+        assert config.validation.fail_action == "inject"
+        assert config.validation.max_consecutive_failures == 5
+
+    def test_validation_rejects_bad_timeout(self) -> None:
+        with pytest.raises(Exception):
+            WorkflowConfig(validation={"test_timeout_seconds": 5})  # ge=10
+
+    def test_validation_rejects_bad_max_failures(self) -> None:
+        with pytest.raises(Exception):
+            WorkflowConfig(validation={"max_consecutive_failures": 0})  # ge=1
+
+
 class TestSessionRotationConfig:
     def test_session_rotation_defaults(self) -> None:
         from config import StagnationConfig
