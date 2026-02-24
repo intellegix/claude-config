@@ -65,6 +65,10 @@ class LimitsConfig(BaseModel):
         default=2, ge=1, le=10,
         description="Fall back after this many consecutive timeouts (before stagnation limit)",
     )
+    trace_max_size_bytes: int = Field(
+        default=10_000_000, ge=0,
+        description="Max trace.jsonl size before rotation (0=unlimited)",
+    )
 
 
 class PerplexityConfig(BaseModel):

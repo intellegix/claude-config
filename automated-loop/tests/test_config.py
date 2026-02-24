@@ -242,6 +242,24 @@ class TestModelAwareConfig:
         assert config.limits.model_fallback == {}
 
 
+class TestTraceRotationConfig:
+    def test_trace_max_size_default(self) -> None:
+        config = WorkflowConfig()
+        assert config.limits.trace_max_size_bytes == 10_000_000
+
+    def test_trace_max_size_custom(self) -> None:
+        config = WorkflowConfig(limits={"trace_max_size_bytes": 5_000_000})
+        assert config.limits.trace_max_size_bytes == 5_000_000
+
+    def test_trace_max_size_zero_unlimited(self) -> None:
+        config = WorkflowConfig(limits={"trace_max_size_bytes": 0})
+        assert config.limits.trace_max_size_bytes == 0
+
+    def test_trace_max_size_rejects_negative(self) -> None:
+        with pytest.raises(Exception):
+            WorkflowConfig(limits={"trace_max_size_bytes": -1})
+
+
 class TestSessionRotationConfig:
     def test_session_rotation_defaults(self) -> None:
         from config import StagnationConfig

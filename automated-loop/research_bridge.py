@@ -217,8 +217,11 @@ class ResearchBridge:
         """Execute a research query with retry and circuit breaker."""
         if self._is_circuit_open():
             return Result.fail(
-                f"Circuit breaker open: {self._consecutive_failures} consecutive failures. "
-                f"Resets after {self.retry_config.circuit_breaker_reset_seconds}s.",
+                f"Circuit breaker open — Perplexity research failed "
+                f"{self._consecutive_failures} times. Will retry in "
+                f"{self.retry_config.circuit_breaker_reset_seconds:.0f}s. "
+                f"Check: 1) Perplexity session: ~/.claude/config/playwright-session.json "
+                f"2) Run: python council_browser.py --save-session",
                 "CIRCUIT_OPEN",
             )
 

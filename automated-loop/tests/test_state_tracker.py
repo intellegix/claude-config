@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from state_tracker import CURRENT_STATE_VERSION, StateTracker, WorkflowState
+from state_tracker import CURRENT_STATE_VERSION, ModelAnalytics, StateTracker, WorkflowState
 
 
 # Uses project_dir fixture from conftest.py
@@ -352,3 +352,123 @@ class TestSessionTracking:
 
         assert tracker.get_session_cost("sess-1") == pytest.approx(2.0)
         assert tracker.get_session_cost("sess-2") == pytest.approx(5.0)
+
+
+class TestModelAnalytics:
+    def test_single_model_analytics(self, project_dir: Path) -> None:
+        """Analytics for a single model computes correct averages."""
+        tracker = StateTracker(project_dir)
+        for i in range(3):
+            tracker.increment_iteration()
+            tracker.add_cycle(
+                prompt=f"step {i}", model="sonnet",
+                cost_usd=0.10, duration_ms=10000, num_turns=5,
+            )
+
+        analytics = tracker.compute_model_analytics()
+        assert "sonnet" in analytics
+        s = analytics["sonnet"]
+        assert s.iterations == 3
+        assert s.avg_turns == 5.0
+        assert s.avg_cost_usd == pytest.approx(0.10)
+        assert s.avg_duration_ms == 10000.0
+        assert s.timeout_count == 0
+        assert s.error_count == 0
+
+    def test_mixed_model_analytics(self, project_dir: Path) -> None:
+        """Analytics splits correctly between opus and sonnet."""
+        tracker = StateTracker(project_dir)
+        # 2 opus cycles
+        for i in range(2):
+            tracker.increment_iteration()
+            tracker.add_cycle(
+                prompt=f"opus {i}", model="opus",
+                cost_usd=0.50, num_turns=10,
+            )
+        # 1 sonnet cycle
+        tracker.increment_iteration()
+        tracker.add_cycle(
+            prompt="sonnet 0", model="sonnet",
+            cost_usd=0.10, num_turns=5,
+        )
+
+        analytics = tracker.compute_model_analytics()
+        assert analytics["opus"].iterations == 2
+        assert analytics["opus"].avg_turns == 10.0
+        assert analytics["sonnet"].iterations == 1
+        assert analytics["sonnet"].avg_turns == 5.0
+
+    def test_timeout_cycles_counted(self, project_dir: Path) -> None:
+        """Zero-turn, zero-cost cycles counted as timeouts."""
+        tracker = StateTracker(project_dir)
+        tracker.increment_iteration()
+        tracker.add_cycle(prompt="timeout", model="opus", cost_usd=0.0, num_turns=0)
+        tracker.increment_iteration()
+        tracker.add_cycle(prompt="success", model="opus", cost_usd=0.5, num_turns=10)
+
+        analytics = tracker.compute_model_analytics()
+        assert analytics["opus"].timeout_count == 1
+        assert analytics["opus"].timeout_rate == pytest.approx(0.5)
+
+    def test_error_cycles_counted(self, project_dir: Path) -> None:
+        """Error cycles counted in error_count and error_rate."""
+        tracker = StateTracker(project_dir)
+        tracker.increment_iteration()
+        tracker.add_cycle(prompt="error", model="sonnet", is_error=True)
+        tracker.increment_iteration()
+        tracker.add_cycle(prompt="ok", model="sonnet", num_turns=5)
+
+        analytics = tracker.compute_model_analytics()
+        assert analytics["sonnet"].error_count == 1
+        assert analytics["sonnet"].error_rate == pytest.approx(0.5)
+
+    def test_backwards_compatibility_no_model_field(self, project_dir: Path) -> None:
+        """Old cycles without model field grouped under 'unknown'."""
+        tracker = StateTracker(project_dir)
+        tracker.increment_iteration()
+        tracker.add_cycle(prompt="old cycle", cost_usd=0.05, num_turns=3)
+
+        analytics = tracker.compute_model_analytics()
+        assert "unknown" in analytics
+        assert analytics["unknown"].iterations == 1
+
+    def test_empty_cycles_returns_empty(self, project_dir: Path) -> None:
+        """No cycles returns empty analytics dict."""
+        tracker = StateTracker(project_dir)
+        analytics = tracker.compute_model_analytics()
+        assert analytics == {}
+
+    def test_model_field_persists_in_state(self, project_dir: Path) -> None:
+        """Model field round-trips through save/load."""
+        tracker = StateTracker(project_dir)
+        tracker.increment_iteration()
+        tracker.add_cycle(prompt="test", model="opus", cost_usd=0.50)
+        tracker.save()
+
+        tracker2 = StateTracker(project_dir)
+        tracker2.load()
+        assert tracker2.state.cycles[0].model == "opus"
+
+    def test_old_state_without_model_loads(self, project_dir: Path) -> None:
+        """State.json from before model field was added still loads."""
+        state_file = project_dir / ".workflow" / "state.json"
+        old_state = {
+            "version": 1,
+            "session_id": "old-session",
+            "iteration": 1,
+            "status": "running",
+            "cycles": [{
+                "iteration": 1,
+                "prompt_preview": "old",
+                "cost_usd": 0.05,
+                "num_turns": 3,
+                "is_error": False,
+            }],
+            "metrics": {"total_cost_usd": 0.05, "total_duration_ms": 0, "total_turns": 3, "error_count": 0, "files_modified": []},
+        }
+        state_file.write_text(json.dumps(old_state), encoding="utf-8")
+
+        tracker = StateTracker(project_dir)
+        result = tracker.load()
+        assert result.success
+        assert tracker.state.cycles[0].model is None

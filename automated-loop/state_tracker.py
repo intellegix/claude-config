@@ -22,6 +22,7 @@ class CycleRecord(BaseModel):
     iteration: int
     prompt_preview: str = Field(default="", max_length=200)
     session_id: Optional[str] = None
+    model: Optional[str] = None
     cost_usd: float = 0.0
     duration_ms: int = 0
     num_turns: int = 0
@@ -29,6 +30,20 @@ class CycleRecord(BaseModel):
     completed_at: Optional[str] = None
     is_error: bool = False
     error_message: Optional[str] = None
+
+
+class ModelAnalytics(BaseModel):
+    """Per-model performance metrics."""
+
+    model: str
+    iterations: int = 0
+    avg_turns: float = 0.0
+    avg_cost_usd: float = 0.0
+    avg_duration_ms: float = 0.0
+    timeout_count: int = 0
+    timeout_rate: float = 0.0
+    error_count: int = 0
+    error_rate: float = 0.0
 
 
 class WorkflowMetrics(BaseModel):
@@ -115,6 +130,7 @@ class StateTracker:
         self,
         prompt: str,
         session_id: Optional[str] = None,
+        model: Optional[str] = None,
         cost_usd: float = 0.0,
         duration_ms: int = 0,
         num_turns: int = 0,
@@ -126,6 +142,7 @@ class StateTracker:
             iteration=self.state.iteration,
             prompt_preview=prompt[:200],
             session_id=session_id,
+            model=model,
             cost_usd=cost_usd,
             duration_ms=duration_ms,
             num_turns=num_turns,
@@ -204,6 +221,31 @@ class StateTracker:
         if not target:
             return 0
         return sum(c.num_turns for c in self.state.cycles if c.session_id == target)
+
+    def compute_model_analytics(self) -> dict[str, ModelAnalytics]:
+        """Compute per-model metrics from cycle history."""
+        by_model: dict[str, list[CycleRecord]] = {}
+        for cycle in self.state.cycles:
+            model = cycle.model or "unknown"
+            by_model.setdefault(model, []).append(cycle)
+
+        result: dict[str, ModelAnalytics] = {}
+        for model, cycles in by_model.items():
+            n = len(cycles)
+            timeouts = sum(1 for c in cycles if c.num_turns == 0 and c.cost_usd == 0)
+            errors = sum(1 for c in cycles if c.is_error)
+            result[model] = ModelAnalytics(
+                model=model,
+                iterations=n,
+                avg_turns=sum(c.num_turns for c in cycles) / n if n else 0,
+                avg_cost_usd=sum(c.cost_usd for c in cycles) / n if n else 0,
+                avg_duration_ms=sum(c.duration_ms for c in cycles) / n if n else 0,
+                timeout_count=timeouts,
+                timeout_rate=timeouts / n if n else 0,
+                error_count=errors,
+                error_rate=errors / n if n else 0,
+            )
+        return result
 
     def get_session_cost(self, session_id: Optional[str] = None) -> float:
         """Sum cost_usd for all cycles matching the given session_id.
