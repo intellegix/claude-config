@@ -507,7 +507,12 @@ class PerplexityCouncil:
         If headless_fallback is True, launches headless first, navigates to Perplexity,
         and if Cloudflare blocks the page, closes and re-launches in headful mode.
         """
-        from playwright.async_api import async_playwright
+        from council_config import USE_REBROWSER
+
+        if USE_REBROWSER:
+            from rebrowser_playwright.async_api import async_playwright
+        else:
+            from playwright.async_api import async_playwright
 
         self.playwright = await async_playwright().start()
 

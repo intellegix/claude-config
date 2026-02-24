@@ -87,10 +87,15 @@ DIRECT_PRICING = {
 DIRECT_TIMEOUT = 60  # seconds per direct provider call
 
 # --- Browser automation (Playwright) ---
-# Headful by default — Cloudflare blocks headless Chromium on perplexity.ai.
-# Playwright headful runs in the background and doesn't need user interaction.
+# rebrowser-playwright patches the CDP Runtime.enable leak that Cloudflare detects.
+# v1.52.0 tested 2026-02-24: ProtocolError persists, Cloudflare still blocks headless.
+# Set USE_REBROWSER = True to re-test after rebrowser-patches updates.
+USE_REBROWSER = False
+
+# Headful by default — rebrowser-patches v1.52.0 does not yet bypass Cloudflare on Perplexity.
+# Set BROWSER_HEADLESS_FALLBACK = True to auto-retry headful if headless gets blocked.
 BROWSER_HEADLESS = False
-BROWSER_HEADLESS_FALLBACK = False  # Try headless first, fall back to headful on Cloudflare
+BROWSER_HEADLESS_FALLBACK = True  # Safety net: headless → detect Cloudflare → retry headful
 BROWSER_TIMEOUT = 180_000  # ms, total timeout for council query
 BROWSER_RESEARCH_TIMEOUT = 480_000  # ms, deep research can take up to 7 min
 BROWSER_LABS_TIMEOUT = 840_000  # ms, labs mode — 14 min (1 min buffer under 15 min MCP timeout)
@@ -156,9 +161,13 @@ def validate_config(mode: str) -> tuple[list[str], list[str]]:
 
     if mode in ("browser", "auto"):
         try:
-            from playwright.async_api import async_playwright  # noqa: F401
+            if USE_REBROWSER:
+                from rebrowser_playwright.async_api import async_playwright  # noqa: F401
+            else:
+                from playwright.async_api import async_playwright  # noqa: F401
         except ImportError:
-            errors.append("Playwright not installed: pip install playwright && playwright install chromium")
+            pkg = "rebrowser-playwright" if USE_REBROWSER else "playwright"
+            errors.append(f"{pkg} not installed: pip install {pkg} && python -m playwright install chromium")
         if not BROWSER_SESSION_PATH.exists():
             warnings.append(f"No session file: {BROWSER_SESSION_PATH}. Run: python council_browser.py --save-session")
 
