@@ -30,6 +30,9 @@ class CycleRecord(BaseModel):
     completed_at: Optional[str] = None
     is_error: bool = False
     error_message: Optional[str] = None
+    tools_used: list[str] = Field(default_factory=list)
+    files_modified: list[str] = Field(default_factory=list)
+    git_diff_stats: Optional[dict] = None
 
 
 class ModelAnalytics(BaseModel):
@@ -136,6 +139,9 @@ class StateTracker:
         num_turns: int = 0,
         is_error: bool = False,
         error_message: Optional[str] = None,
+        tools_used: Optional[list[str]] = None,
+        files_modified: Optional[list[str]] = None,
+        git_diff_stats: Optional[dict] = None,
     ) -> None:
         """Record a completed loop cycle."""
         cycle = CycleRecord(
@@ -149,6 +155,9 @@ class StateTracker:
             completed_at=datetime.now(timezone.utc).isoformat(),
             is_error=is_error,
             error_message=error_message,
+            tools_used=tools_used or [],
+            files_modified=files_modified or [],
+            git_diff_stats=git_diff_stats,
         )
         self.state.cycles.append(cycle)
 

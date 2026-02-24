@@ -11,6 +11,7 @@ import argparse
 import json
 import logging
 import re
+import shlex
 import subprocess
 import sys
 import threading
@@ -73,6 +74,7 @@ class LoopDriver:
         self.initial_prompt = initial_prompt or self._default_prompt()
         self._stagnation_reset_done = False  # Track if session was already reset for stagnation
         self._consecutive_timeouts = 0
+        self._consecutive_test_failures = 0
         self._using_fallback = False
         self._original_model: Optional[str] = None
         self.tracker = StateTracker(self.project_path)
@@ -272,6 +274,11 @@ class LoopDriver:
                     )
             is_error = parsed.result.is_error if parsed.result else bool(parsed.errors)
 
+            # Capture tool usage and file modification data
+            tools_used = sorted(parsed.tools_used)
+            files_modified = list(parsed.files_modified)
+            git_diff_stats = self._capture_git_diff_stats()
+
             self._write_trace_event(
                 "claude_complete",
                 session_id=parsed.session_id,
@@ -279,6 +286,9 @@ class LoopDriver:
                 num_turns=num_turns,
                 is_error=is_error,
                 duration_ms=duration_ms,
+                tools_used=tools_used,
+                files_modified=files_modified,
+                git_diff_stats=git_diff_stats,
             )
 
             self.tracker.increment_iteration()
@@ -290,6 +300,9 @@ class LoopDriver:
                 duration_ms=duration_ms,
                 num_turns=num_turns,
                 is_error=is_error,
+                tools_used=tools_used,
+                files_modified=files_modified,
+                git_diff_stats=git_diff_stats,
             )
             self.tracker.save()
 
@@ -507,6 +520,31 @@ class LoopDriver:
                 self._write_trace_event("loop_end", exit_code=EXIT_COMPLETE, status="completed")
                 self._write_metrics_summary(EXIT_COMPLETE)
                 return EXIT_COMPLETE
+
+            # Post-execution validation (only on productive, non-error iterations)
+            if (not timed_out and not is_error
+                    and num_turns > self.config.stagnation.low_turn_threshold):
+                validation = self._run_post_validation()
+                if (validation.success and validation.data
+                        and not validation.data.get("skipped")
+                        and not validation.data.get("passed")):
+                    self._consecutive_test_failures += 1
+                    if (self.config.validation.fail_action == "inject"
+                            and self._consecutive_test_failures < self.config.validation.max_consecutive_failures):
+                        test_output = validation.data.get("stdout_tail", "")
+                        current_prompt = (
+                            "CRITICAL: Tests are failing after your changes. Fix them before continuing.\n\n"
+                            f"Test output:\n{test_output}\n\n"
+                            "Re-run the test suite to verify the fix, then continue."
+                        )
+                        continue
+                    elif self._consecutive_test_failures >= self.config.validation.max_consecutive_failures:
+                        logger.warning(
+                            "Max consecutive test failures (%d) — falling back to warn mode",
+                            self.config.validation.max_consecutive_failures,
+                        )
+                else:
+                    self._consecutive_test_failures = 0
 
             # Query Perplexity for next steps
             logger.info("Querying Perplexity for next steps...")
@@ -770,6 +808,95 @@ class LoopDriver:
         except (OSError, ValueError):
             pass
 
+    def _capture_git_diff_stats(self) -> Optional[dict]:
+        """Capture git diff --stat summary for the current HEAD.
+
+        Returns {"files_changed": N, "insertions": N, "deletions": N} or None.
+        """
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--stat", "HEAD"],
+                cwd=str(self.project_path),
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode != 0:
+                return None
+            # Parse summary line: " N files changed, N insertions(+), N deletions(-)"
+            for line in reversed(result.stdout.strip().splitlines()):
+                if "changed" in line:
+                    stats: dict[str, int] = {"files_changed": 0, "insertions": 0, "deletions": 0}
+                    parts = line.strip().split(",")
+                    for part in parts:
+                        part = part.strip()
+                        if "file" in part and "changed" in part:
+                            stats["files_changed"] = int(part.split()[0])
+                        elif "insertion" in part:
+                            stats["insertions"] = int(part.split()[0])
+                        elif "deletion" in part:
+                            stats["deletions"] = int(part.split()[0])
+                    return stats
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
+        return None
+
+    def _run_post_validation(self) -> Result:
+        """Run post-execution test validation if enabled.
+
+        Returns Result with data dict: {"skipped": True} if disabled/not applicable,
+        {"passed": bool, "stdout_tail": str, "returncode": int} otherwise.
+        """
+        if not self.config.validation.enabled:
+            return Result.ok({"skipped": True})
+
+        self._write_trace_event("validation_start")
+
+        try:
+            cmd = shlex.split(self.config.validation.test_command)
+            result = subprocess.run(
+                cmd,
+                cwd=str(self.project_path),
+                capture_output=True, text=True,
+                timeout=self.config.validation.test_timeout_seconds,
+            )
+            passed = result.returncode == 0
+            stdout_tail = result.stdout[-500:] if result.stdout else ""
+            stderr_tail = result.stderr[-200:] if result.stderr else ""
+
+            self._write_trace_event(
+                "validation_complete",
+                passed=passed,
+                returncode=result.returncode,
+            )
+
+            if passed:
+                logger.info("Post-execution validation passed")
+            else:
+                logger.warning(
+                    "Post-execution validation FAILED (rc=%d): %s",
+                    result.returncode, stderr_tail[:200],
+                )
+
+            return Result.ok({
+                "passed": passed,
+                "stdout_tail": stdout_tail,
+                "returncode": result.returncode,
+            })
+
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "Post-execution validation timed out after %ds",
+                self.config.validation.test_timeout_seconds,
+            )
+            self._write_trace_event(
+                "validation_timeout",
+                timeout_seconds=self.config.validation.test_timeout_seconds,
+            )
+            return Result.ok({"skipped": True, "timeout": True})
+
+        except FileNotFoundError as e:
+            logger.warning("Validation command not found: %s", e)
+            return Result.fail(f"Validation command not found: {e}", "FILE_NOT_FOUND")
+
     def _dry_run_result(self) -> ParsedStream:
         """Return a simulated ParsedStream for dry runs."""
         from ndjson_parser import ClaudeEvent, ClaudeResult
@@ -908,6 +1035,17 @@ class LoopDriver:
         """Write a metrics summary JSON file on loop completion."""
         metrics = self.tracker.get_metrics()
         analytics = self.tracker.compute_model_analytics()
+
+        # Aggregate tool usage counts across all cycles
+        tool_counts: dict[str, int] = {}
+        all_files: list[str] = []
+        for cycle in self.tracker.state.cycles:
+            for tool in cycle.tools_used:
+                tool_counts[tool] = tool_counts.get(tool, 0) + 1
+            all_files.extend(cycle.files_modified)
+        # Deduplicate files
+        total_files_modified = list(dict.fromkeys(all_files))
+
         summary = {
             "exit_code": exit_code,
             "status": self.tracker.state.status,
@@ -917,6 +1055,8 @@ class LoopDriver:
             "error_count": metrics.error_count,
             "total_duration_ms": metrics.total_duration_ms,
             "model_analytics": {k: v.model_dump() for k, v in analytics.items()},
+            "tool_usage_counts": tool_counts,
+            "total_files_modified": total_files_modified,
         }
         path = self.project_path / ".workflow" / "metrics_summary.json"
         try:

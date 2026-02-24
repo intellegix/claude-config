@@ -15,8 +15,10 @@ from helpers import (
     build_ndjson_stream,
     make_popen_dispatcher,
     make_subprocess_dispatcher,
+    mock_git_diff_stat_result,
     mock_git_log_result,
     mock_playwright_result,
+    mock_test_result,
     mock_verification_result,
     MockPopen,
 )
@@ -1907,3 +1909,296 @@ class TestVerificationIntegration:
         event_types = [e["event_type"] for e in events]
         assert "verification_start" in event_types
         assert "verification_complete" in event_types
+
+
+class TestGitDiffStatsCapture:
+    """Tests for _capture_git_diff_stats() in LoopDriver."""
+
+    @patch("subprocess.run")
+    def test_git_diff_stats_parses_output(
+        self, mock_run: MagicMock, project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """Parses git diff --stat summary line correctly."""
+        mock_run.return_value = mock_git_diff_stat_result(5, 120, 30)
+        driver = LoopDriver(project_dir, config, dry_run=True, skip_preflight=True)
+        stats = driver._capture_git_diff_stats()
+        assert stats is not None
+        assert stats["files_changed"] == 5
+        assert stats["insertions"] == 120
+        assert stats["deletions"] == 30
+
+    @patch("subprocess.run")
+    def test_git_diff_stats_not_git_repo(
+        self, mock_run: MagicMock, project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """Returns None when not a git repo."""
+        mock_run.return_value = MagicMock(returncode=128, stdout="", stderr="not a git repo")
+        driver = LoopDriver(project_dir, config, dry_run=True, skip_preflight=True)
+        stats = driver._capture_git_diff_stats()
+        assert stats is None
+
+    @patch("subprocess.run")
+    def test_git_diff_stats_timeout(
+        self, mock_run: MagicMock, project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """Returns None on timeout."""
+        mock_run.side_effect = sp.TimeoutExpired(cmd="git", timeout=10)
+        driver = LoopDriver(project_dir, config, dry_run=True, skip_preflight=True)
+        stats = driver._capture_git_diff_stats()
+        assert stats is None
+
+    @patch("subprocess.run")
+    def test_git_diff_stats_no_changes(
+        self, mock_run: MagicMock, project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """Returns None when no changes (empty output)."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        driver = LoopDriver(project_dir, config, dry_run=True, skip_preflight=True)
+        stats = driver._capture_git_diff_stats()
+        assert stats is None
+
+
+class TestCycleTrackingInTrace:
+    """Tests for tools_used/files_modified in trace and metrics."""
+
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_claude_complete_trace_includes_tools(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """claude_complete trace event includes tools_used and files_modified."""
+        # Build NDJSON with tool use events
+        ndjson_lines = [
+            json.dumps({"type": "init", "session_id": "s1"}),
+            json.dumps({
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [
+                    {"type": "tool_use", "name": "Edit", "input": {"file_path": "main.py"}},
+                    {"type": "tool_use", "name": "Read", "input": {"file_path": "config.py"}},
+                    {"type": "text", "text": "PROJECT_COMPLETE"},
+                ]},
+                "session_id": "s1",
+            }),
+            json.dumps({
+                "type": "result", "session_id": "s1",
+                "total_cost_usd": 0.05, "total_duration_ms": 5000,
+                "num_turns": 2, "result": "PROJECT_COMPLETE", "is_error": False,
+            }),
+        ]
+        ndjson_stream = "\n".join(ndjson_lines)
+
+        mock_popen.side_effect = make_popen_dispatcher(claude_ndjson=ndjson_stream)
+        mock_run.side_effect = make_subprocess_dispatcher()
+
+        driver = LoopDriver(project_dir, config)
+        driver.run()
+
+        trace_path = project_dir / ".workflow" / "trace.jsonl"
+        events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").strip().splitlines()]
+        complete_events = [e for e in events if e["event_type"] == "claude_complete"]
+        assert len(complete_events) >= 1
+        ce = complete_events[0]
+        assert "tools_used" in ce
+        assert "Edit" in ce["tools_used"]
+        assert "Read" in ce["tools_used"]
+        assert "files_modified" in ce
+        assert "main.py" in ce["files_modified"]
+
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_metrics_summary_includes_tool_counts(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """Metrics summary includes tool_usage_counts and total_files_modified."""
+        ndjson_lines = [
+            json.dumps({"type": "init", "session_id": "s1"}),
+            json.dumps({
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [
+                    {"type": "tool_use", "name": "Edit", "input": {"file_path": "main.py"}},
+                    {"type": "tool_use", "name": "Edit", "input": {"file_path": "config.py"}},
+                    {"type": "text", "text": "PROJECT_COMPLETE"},
+                ]},
+                "session_id": "s1",
+            }),
+            json.dumps({
+                "type": "result", "session_id": "s1",
+                "total_cost_usd": 0.05, "total_duration_ms": 5000,
+                "num_turns": 2, "result": "PROJECT_COMPLETE", "is_error": False,
+            }),
+        ]
+        ndjson_stream = "\n".join(ndjson_lines)
+
+        mock_popen.side_effect = make_popen_dispatcher(claude_ndjson=ndjson_stream)
+        mock_run.side_effect = make_subprocess_dispatcher()
+
+        driver = LoopDriver(project_dir, config)
+        driver.run()
+
+        summary_path = project_dir / ".workflow" / "metrics_summary.json"
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        assert "tool_usage_counts" in summary
+        assert summary["tool_usage_counts"].get("Edit", 0) >= 1
+        assert "total_files_modified" in summary
+        assert "main.py" in summary["total_files_modified"]
+
+
+class TestPostExecutionValidation:
+    """Tests for _run_post_validation() and validation loop integration."""
+
+    @patch("subprocess.run")
+    def test_validation_disabled_skips_subprocess(
+        self, mock_run: MagicMock, project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """Validation disabled returns skipped, no subprocess calls."""
+        config.validation.enabled = False
+        driver = LoopDriver(project_dir, config, dry_run=True, skip_preflight=True)
+        result = driver._run_post_validation()
+        assert result.success
+        assert result.data["skipped"] is True
+        # No subprocess.run calls for test command
+        mock_run.assert_not_called()
+
+    @patch("subprocess.run")
+    def test_validation_passes_continues(
+        self, mock_run: MagicMock, project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """Passing validation returns passed=True."""
+        config.validation.enabled = True
+        mock_run.return_value = mock_test_result(passed=True)
+        driver = LoopDriver(project_dir, config, dry_run=True, skip_preflight=True)
+        result = driver._run_post_validation()
+        assert result.success
+        assert result.data["passed"] is True
+
+    @patch("subprocess.run")
+    def test_validation_fails_returns_failure_data(
+        self, mock_run: MagicMock, project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """Failing validation returns passed=False with stdout_tail."""
+        config.validation.enabled = True
+        mock_run.return_value = mock_test_result(passed=False, stdout="FAILED test_foo")
+        driver = LoopDriver(project_dir, config, dry_run=True, skip_preflight=True)
+        result = driver._run_post_validation()
+        assert result.success  # Result itself is ok, the data says "failed"
+        assert result.data["passed"] is False
+        assert "FAILED" in result.data["stdout_tail"]
+
+    @patch("subprocess.run")
+    def test_validation_timeout_handled(
+        self, mock_run: MagicMock, project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """Timeout returns skipped with timeout flag."""
+        config.validation.enabled = True
+        mock_run.side_effect = sp.TimeoutExpired(cmd="pytest", timeout=120)
+        driver = LoopDriver(project_dir, config, dry_run=True, skip_preflight=True)
+        result = driver._run_post_validation()
+        assert result.success
+        assert result.data.get("timeout") is True
+
+    @patch("subprocess.run")
+    def test_validation_command_not_found(
+        self, mock_run: MagicMock, project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """FileNotFoundError returns Result.fail."""
+        config.validation.enabled = True
+        mock_run.side_effect = FileNotFoundError("pytest not found")
+        driver = LoopDriver(project_dir, config, dry_run=True, skip_preflight=True)
+        result = driver._run_post_validation()
+        assert not result.success
+        assert result.error_code == "FILE_NOT_FOUND"
+
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_validation_fails_warn_continues_to_research(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """In warn mode, test failure logs warning but continues to research."""
+        config.limits.max_iterations = 2
+        config.validation.enabled = True
+        config.validation.fail_action = "warn"
+
+        mock_popen.side_effect = make_popen_dispatcher(
+            claude_ndjson=build_ndjson_stream("s1", 0.01, 5, "Working..."),
+        )
+        mock_run.side_effect = make_subprocess_dispatcher(
+            research_result=mock_playwright_result(),
+            test_result=mock_test_result(passed=False),
+        )
+
+        driver = LoopDriver(project_dir, config)
+        exit_code = driver.run()
+        assert exit_code == EXIT_MAX_ITERATIONS
+
+        # Verify research still happened
+        trace_path = project_dir / ".workflow" / "trace.jsonl"
+        events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").strip().splitlines()]
+        event_types = [e["event_type"] for e in events]
+        assert "research_start" in event_types
+
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_validation_fails_inject_skips_research(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """In inject mode, test failure feeds fix prompt to next iteration (skips research)."""
+        config.limits.max_iterations = 3
+        config.validation.enabled = True
+        config.validation.fail_action = "inject"
+        config.validation.max_consecutive_failures = 5
+
+        popen_prompts = []
+        call_count = [0]
+
+        def popen_side_effect(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get("args", [])
+            if isinstance(cmd, list) and cmd and cmd[0] == "claude":
+                call_count[0] += 1
+                prompt_idx = cmd.index("-p") + 1 if "-p" in cmd else 2
+                popen_prompts.append(cmd[prompt_idx])
+                return MockPopen(build_ndjson_stream(f"s{call_count[0]}", 0.01, 5, "Working..."))
+            return MockPopen("")
+
+        mock_popen.side_effect = popen_side_effect
+        mock_run.side_effect = make_subprocess_dispatcher(
+            research_result=mock_playwright_result(),
+            test_result=mock_test_result(passed=False, stdout="FAILED test_widget"),
+        )
+
+        driver = LoopDriver(project_dir, config)
+        driver.run()
+
+        # After first iteration fails tests in inject mode, next prompt should be fix prompt
+        assert len(popen_prompts) >= 2
+        assert "CRITICAL: Tests are failing" in popen_prompts[1]
+
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_validation_trace_events(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """Trace includes validation_start and validation_complete events."""
+        config.limits.max_iterations = 1
+        config.validation.enabled = True
+
+        mock_popen.side_effect = make_popen_dispatcher(
+            claude_ndjson=build_ndjson_stream("s1", 0.01, 5, "Working..."),
+        )
+        mock_run.side_effect = make_subprocess_dispatcher(
+            research_result=mock_playwright_result(),
+            test_result=mock_test_result(passed=True),
+        )
+
+        driver = LoopDriver(project_dir, config)
+        driver.run()
+
+        trace_path = project_dir / ".workflow" / "trace.jsonl"
+        events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").strip().splitlines()]
+        event_types = [e["event_type"] for e in events]
+        assert "validation_start" in event_types
+        assert "validation_complete" in event_types

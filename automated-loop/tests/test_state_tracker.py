@@ -472,3 +472,79 @@ class TestModelAnalytics:
         result = tracker.load()
         assert result.success
         assert tracker.state.cycles[0].model is None
+
+
+class TestEnhancedCycleTracking:
+    """Tests for tools_used, files_modified, git_diff_stats on CycleRecord."""
+
+    def test_cycle_record_tools_fields_defaults(self, project_dir: Path) -> None:
+        """New CycleRecord has empty tools_used, files_modified, None git_diff_stats."""
+        tracker = StateTracker(project_dir)
+        tracker.increment_iteration()
+        tracker.add_cycle(prompt="test")
+        cycle = tracker.state.cycles[0]
+        assert cycle.tools_used == []
+        assert cycle.files_modified == []
+        assert cycle.git_diff_stats is None
+
+    def test_cycle_record_tools_fields_persist(self, project_dir: Path) -> None:
+        """Tools fields persist through save/load roundtrip."""
+        tracker = StateTracker(project_dir)
+        tracker.increment_iteration()
+        tracker.add_cycle(
+            prompt="test",
+            tools_used=["Edit", "Read", "Write"],
+            files_modified=["src/main.py", "tests/test_main.py"],
+            git_diff_stats={"files_changed": 2, "insertions": 30, "deletions": 5},
+        )
+        tracker.save()
+
+        tracker2 = StateTracker(project_dir)
+        tracker2.load()
+        cycle = tracker2.state.cycles[0]
+        assert cycle.tools_used == ["Edit", "Read", "Write"]
+        assert cycle.files_modified == ["src/main.py", "tests/test_main.py"]
+        assert cycle.git_diff_stats == {"files_changed": 2, "insertions": 30, "deletions": 5}
+
+    def test_add_cycle_with_tools(self, project_dir: Path) -> None:
+        """add_cycle passes tools data through to CycleRecord."""
+        tracker = StateTracker(project_dir)
+        tracker.increment_iteration()
+        tracker.add_cycle(
+            prompt="implement feature",
+            session_id="s1",
+            tools_used=["Bash", "Edit"],
+            files_modified=["config.py"],
+            git_diff_stats={"files_changed": 1, "insertions": 10, "deletions": 0},
+        )
+        cycle = tracker.state.cycles[0]
+        assert cycle.tools_used == ["Bash", "Edit"]
+        assert cycle.files_modified == ["config.py"]
+        assert cycle.git_diff_stats["files_changed"] == 1
+
+    def test_old_state_without_tools_fields_loads(self, project_dir: Path) -> None:
+        """State.json from before tools fields were added still loads (Pydantic defaults)."""
+        state_file = project_dir / ".workflow" / "state.json"
+        old_state = {
+            "version": 1,
+            "session_id": "old-session",
+            "iteration": 1,
+            "status": "running",
+            "cycles": [{
+                "iteration": 1,
+                "prompt_preview": "old cycle",
+                "cost_usd": 0.05,
+                "num_turns": 3,
+                "is_error": False,
+            }],
+            "metrics": {"total_cost_usd": 0.05, "total_duration_ms": 0, "total_turns": 3, "error_count": 0, "files_modified": []},
+        }
+        state_file.write_text(json.dumps(old_state), encoding="utf-8")
+
+        tracker = StateTracker(project_dir)
+        result = tracker.load()
+        assert result.success
+        cycle = tracker.state.cycles[0]
+        assert cycle.tools_used == []
+        assert cycle.files_modified == []
+        assert cycle.git_diff_stats is None

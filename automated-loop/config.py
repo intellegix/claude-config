@@ -137,6 +137,22 @@ class VerificationConfig(BaseModel):
     verification_timeout_seconds: int = Field(default=600, ge=60)
 
 
+class ValidationConfig(BaseModel):
+    """Post-execution validation settings."""
+
+    enabled: bool = Field(default=False)
+    test_command: str = Field(default="pytest tests/ -v --tb=short")
+    test_timeout_seconds: int = Field(default=120, ge=10, le=600)
+    fail_action: str = Field(
+        default="warn",
+        description="Action on test failure: 'warn' logs and continues; 'inject' feeds failure to next prompt",
+    )
+    max_consecutive_failures: int = Field(
+        default=3, ge=1, le=10,
+        description="Max consecutive test failures before falling back to 'warn' mode",
+    )
+
+
 class StagnationConfig(BaseModel):
     """Diminishing returns detection to prevent runaway loops.
 
@@ -182,6 +198,7 @@ class WorkflowConfig(BaseModel):
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     retry: RetryConfig = Field(default_factory=RetryConfig)
     stagnation: StagnationConfig = Field(default_factory=StagnationConfig)
+    validation: ValidationConfig = Field(default_factory=ValidationConfig)
     verification: VerificationConfig = Field(default_factory=VerificationConfig)
     exploration: ExplorationConfig = Field(default_factory=ExplorationConfig)
 
