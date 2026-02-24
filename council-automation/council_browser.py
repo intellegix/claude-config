@@ -414,12 +414,18 @@ class PerplexityCouncil:
             await self._start_non_persistent()
 
     async def _start_non_persistent(self) -> None:
-        """Launch browser with browser.new_context(storage_state=...).
+        """Launch browser with an isolated temp profile directory.
 
-        No shared profile directory — supports multiple concurrent sessions.
+        Each session gets its own user-data-dir via launch_persistent_context()
+        to prevent Chrome SingletonLock conflicts when multiple instances run
+        concurrently. Cookies injected via _load_session() after launch.
         """
+        self._temp_profile_dir = tempfile.mkdtemp(prefix="council_np_")
+        _log(f"Non-persistent: using isolated profile {self._temp_profile_dir}")
         pids_before = _get_chrome_pids() if not self.headless else set()
-        self._browser = await self.playwright.chromium.launch(
+
+        self.context = await self.playwright.chromium.launch_persistent_context(
+            user_data_dir=self._temp_profile_dir,
             channel="chrome",
             headless=self.headless,
             args=[
@@ -427,27 +433,11 @@ class PerplexityCouncil:
                 "--no-first-run",
                 "--no-default-browser-check",
             ],
+            viewport={"width": 1280, "height": 900},
         )
 
-        storage_state = self._build_storage_state(self.session_path)
-
-        if storage_state:
-            self.context = await self._browser.new_context(
-                viewport={"width": 1280, "height": 900},
-                storage_state=storage_state,
-            )
-            _log(f"Loaded {len(storage_state['cookies'])} cookies from {self.session_path.name}")
-            ls_origins = storage_state.get("origins", [])
-            if ls_origins:
-                ls_count = len(ls_origins[0].get("localStorage", []))
-                _log(f"Injected {ls_count} localStorage items")
-        else:
-            self.context = await self._browser.new_context(
-                viewport={"width": 1280, "height": 900},
-            )
-            # Fallback: try loading session via add_cookies if file exists
-            if self.session_path.exists():
-                await self._load_session()
+        if self.session_path.exists():
+            await self._load_session()
 
         # Apply stealth scripts
         await self.context.add_init_script(self._stealth_scripts())
@@ -484,7 +474,7 @@ class PerplexityCouncil:
         Uses a unique temp dir per session — no SingletonLock conflicts.
         Cookies injected via _load_session() after launch.
         """
-        self._temp_profile_dir = tempfile.mkdtemp(prefix="council_browser_")
+        self._temp_profile_dir = tempfile.mkdtemp(prefix="council_cf_")
         _log(f"Cloudflare fallback: using temp profile {self._temp_profile_dir}")
         pids_before = _get_chrome_pids() if not self.headless else set()
 
