@@ -1,12 +1,19 @@
 # Intellegix Code Agent Toolkit
 
-A self-driving automation loop that pairs **Claude Code CLI** with **Perplexity research automation** to execute multi-step software engineering tasks autonomously. No API keys required — just a [Claude Code subscription](https://claude.ai/code).
+A self-driving automation loop that pairs **Claude Code CLI** with **Perplexity deep research** via an **MCP browser bridge** to execute multi-step software engineering tasks autonomously. No API keys required — just a [Claude Code subscription](https://claude.ai/code).
+
+The two cornerstones of the toolkit:
+
+1. **Perplexity Research Automation** — Playwright-driven browser automation that runs deep research queries through Perplexity's web UI, giving Claude access to real-time web knowledge between iterations. Free tier, no API key, $0/query.
+2. **MCP Browser Bridge** — A Chrome extension + WebSocket bridge that provides reliable browser automation for Claude Code, working around the limitations of Claude's built-in browser capabilities.
+
+> **Note:** The toolkit also includes council automation (multi-model queries via Perplexity), which requires a Perplexity Pro/Max subscription. Research mode works on the free tier.
 
 ## Prerequisites
 
 - **Python 3.11+**
 - **Claude Code CLI** — installed via `npm install -g @anthropic-ai/claude-code` (requires a Max $20/mo or Team $100/mo subscription; no API key needed)
-- **Perplexity account** — free tier works for research queries; login session is cached via Playwright (no API key, $0/query). Council automation (multi-model queries) requires a Perplexity subscription.
+- **Perplexity account** — free tier works for research queries; login session is cached via Playwright (no API key, $0/query)
 
 ## Quick Start
 
@@ -53,6 +60,13 @@ That's it. The loop reads your project's `CLAUDE.md` for instructions, spawns Cl
 
 ## Features
 
+### Research & Browser Automation
+- **Perplexity research automation** — deep research queries via Playwright browser session, giving Claude real-time web knowledge ($0/query, no API key)
+- **MCP browser bridge** — Chrome extension + WebSocket bridge for reliable browser automation, bypassing Claude's built-in browser limitations
+- **Smart completion detection** — stop-button monitoring + MutationObserver + text stability signals to detect when Perplexity finishes
+- **Circuit breaker** — trips after 5 consecutive research failures, 120s cooldown with exponential backoff
+
+### Loop Orchestration
 - **Zero API keys** — Claude Code subscription handles auth; Perplexity uses browser session
 - **Model-aware scaling** — Opus gets 2x timeout + 25-turn cap; Haiku gets 0.5x timeout
 - **Automatic model fallback** — falls back (e.g., opus to sonnet) after consecutive timeouts, reverts on productive iteration
@@ -61,7 +75,8 @@ That's it. The loop reads your project's `CLAUDE.md` for instructions, spawns Cl
 - **Budget enforcement** — per-iteration and total budget caps with graceful exit
 - **Stagnation detection** — two-strike system: resets session first, then exits (code 3)
 - **Timeout cooldown** — exponential backoff (60s base, 300s cap) between timeout retries
-- **Circuit breaker** — trips after 5 consecutive research failures, 120s cooldown
+
+### Observability
 - **Trace logging** — JSONL trace with auto-rotation at 10MB
 - **Extended preflight** — verifies CLI, CLAUDE.md, git, and .workflow writability before starting
 - **Per-model analytics** — tracks iterations, avg cost/turns/duration, timeout and error rates per model
