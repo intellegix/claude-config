@@ -80,8 +80,8 @@ def test_parse_cookie_string_with_values_containing_equals():
 def test_council_init_defaults():
     """PerplexityCouncil initializes with default config values."""
     council = PerplexityCouncil()
-    assert council.headless is False  # Headful by default (Cloudflare blocks headless)
-    assert council.timeout == 120_000
+    assert council.headless is False  # Headful by default (rebrowser v1.52.0 doesn't bypass Cloudflare yet)
+    assert council.timeout == 180_000
     assert isinstance(council.selectors, dict)
     assert council.playwright is None
     assert council.context is None

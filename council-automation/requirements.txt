@@ -4,3 +4,4 @@ aiohttp
 openai>=1.0
 google-generativeai>=0.3.0
 playwright
+rebrowser-playwright>=1.52.0  # CDP leak patching for headless Cloudflare bypass (optional, toggle USE_REBROWSER)
