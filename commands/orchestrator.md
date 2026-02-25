@@ -190,7 +190,7 @@ Append to `.workflow/orchestrator-log.jsonl` in the target project:
 {"event": "loop_launched", "timestamp": "<ISO-8601>", "command": "<full command>", "task": "<task description>"}
 ```
 
-### Step 4: Transition to Monitoring
+### Step 5: Transition to Monitoring
 
 Say: "Loop launched. Entering monitoring mode — I'll check progress every 10 minutes."
 
