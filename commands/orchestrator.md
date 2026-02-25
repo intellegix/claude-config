@@ -139,7 +139,17 @@ Add optional flags based on context:
 
 Run the command as a **background Bash process** (`run_in_background: true`).
 
-### Step 3: Log Launch
+### Step 3: Fire Desktop Notification
+
+Extract the project name from `<target-project-path>` (last directory component) and send a Windows toast notification:
+
+```bash
+powershell -ExecutionPolicy Bypass -File "C:\Users\AustinKidwell\.claude\automated-loop\notify.ps1" -Title "Orchestrator Fired" -Message "Loop running for: <PROJECT_NAME>"
+```
+
+Replace `<PROJECT_NAME>` with the basename of the target project path (e.g., `my-app` from `/home/user/projects/my-app`).
+
+### Step 4: Log Launch
 
 Append to `.workflow/orchestrator-log.jsonl` in the target project:
 ```json
@@ -195,13 +205,17 @@ Say: "Loop launched. Entering monitoring mode — I'll check progress every 10 m
 ## Phase D: REPORTING (summarize results)
 
 1. Read final `.workflow/state.json` and `git log --oneline -10` from target project
-2. Summarize:
+2. Fire a completion toast notification:
+   ```bash
+   powershell -ExecutionPolicy Bypass -File "C:\Users\AustinKidwell\.claude\automated-loop\notify.ps1" -Title "Orchestrator Complete" -Message "Loop finished for: <PROJECT_NAME>"
+   ```
+3. Summarize:
    - Tasks completed (phases marked COMPLETE in CLAUDE.md)
    - Files changed (from git diff)
    - Total cost and duration
    - Any remaining TODO phases
-3. Ask: "Current task complete. You can give me a NEW task to run (one at a time), or `/orchestrator off` to deactivate."
-4. **Stay in orchestrator mode** — persistent until explicit deactivation
+4. Ask: "Current task complete. You can give me a NEW task to run (one at a time), or `/orchestrator off` to deactivate."
+5. **Stay in orchestrator mode** — persistent until explicit deactivation
 
 ---
 
