@@ -75,6 +75,7 @@ class LoopDriver:
         self._stagnation_reset_done = False  # Track if session was already reset for stagnation
         self._consecutive_timeouts = 0
         self._consecutive_test_failures = 0
+        self._gate_rejection_count: int = 0
         self._using_fallback = False
         self._original_model: Optional[str] = None
         self.tracker = StateTracker(self.project_path)
@@ -512,6 +513,43 @@ class LoopDriver:
                 output_text = parsed.result.result_text
             output_text += " " + parsed.assistant_text
             if self._check_completion(output_text):
+                # Validate against completion gate
+                gate_valid, rejection_reason = self._validate_completion_gate(parsed)
+                if not gate_valid:
+                    self._gate_rejection_count += 1
+                    max_rej = self.config.completion_gate.max_rejections
+                    logger.warning(
+                        "COMPLETION REJECTED (%d/%d): %s",
+                        self._gate_rejection_count, max_rej, rejection_reason,
+                    )
+                    self._write_trace_event(
+                        "completion_gate_rejected",
+                        reason=rejection_reason,
+                        rejection_count=self._gate_rejection_count,
+                    )
+                    if self._gate_rejection_count >= max_rej:
+                        logger.error(
+                            "Max completion gate rejections (%d) reached -- exiting as stagnation",
+                            max_rej,
+                        )
+                        self.tracker.fail(f"Completion gate rejected {max_rej} times")
+                        self.tracker.save()
+                        self._log_summary(i)
+                        self._write_trace_event("loop_end", exit_code=EXIT_STAGNATION, status="stagnation")
+                        self._write_metrics_summary(EXIT_STAGNATION)
+                        return EXIT_STAGNATION
+                    current_prompt = (
+                        f"COMPLETION REJECTED (attempt {self._gate_rejection_count}/{max_rej}): "
+                        "You signaled PROJECT_COMPLETE but the completion gate in CLAUDE.md "
+                        "has unchecked items.\n\n"
+                        f"{rejection_reason}\n\n"
+                        "Complete the remaining items, then check them off in "
+                        "CLAUDE.md before signaling completion again."
+                    )
+                    continue  # Skip research, go to next iteration with rejection prompt
+
+                # Gate passed (or no gate) -- reset counter
+                self._gate_rejection_count = 0
                 logger.info("Completion marker detected! Project is complete.")
                 self._write_trace_event("completion_detected")
                 self.tracker.complete()
@@ -549,7 +587,10 @@ class LoopDriver:
             # Query Perplexity for next steps
             logger.info("Querying Perplexity for next steps...")
             self._write_trace_event("research_start")
-            research_result = self.bridge.query()
+            focus_area = self._derive_focus_area(parsed)
+            if focus_area:
+                logger.info("Research focus area: %s", focus_area[:100])
+            research_result = self.bridge.query(focus_area=focus_area)
             self._write_trace_event(
                 "research_complete",
                 success=research_result.success,
@@ -1002,6 +1043,52 @@ class LoopDriver:
                 return True
         return False
 
+    def _parse_completion_gate(self, claude_md_path: Path) -> tuple[list[str], list[str]]:
+        """Parse CLAUDE.md for Completion Gate checklist. Returns (checked, unchecked)."""
+        if not claude_md_path.exists():
+            return ([], [])
+        try:
+            content = claude_md_path.read_text(encoding="utf-8-sig").replace("\r\n", "\n")
+        except OSError as e:
+            logger.warning("Failed to read CLAUDE.md for gate: %s", e)
+            return ([], [])
+
+        marker = self.config.completion_gate.section_marker
+        lines = content.split("\n")
+        in_gate = False
+        checked: list[str] = []
+        unchecked: list[str] = []
+        for line in lines:
+            if line.strip() == marker:
+                in_gate = True
+                continue
+            if in_gate and line.startswith("#"):
+                break
+            if in_gate:
+                s = line.strip()
+                if s.startswith("- [x]") or s.startswith("- [X]"):
+                    checked.append(s[5:].strip())
+                elif s.startswith("- [ ]"):
+                    unchecked.append(s[5:].strip())
+        return (checked, unchecked)
+
+    def _validate_completion_gate(self, parsed: ParsedStream) -> tuple[bool, Optional[str]]:
+        """Validate completion gate. Returns (is_valid, rejection_reason)."""
+        if not self.config.completion_gate.enabled:
+            return (True, None)
+        claude_md = self.project_path / "CLAUDE.md"
+        checked, unchecked = self._parse_completion_gate(claude_md)
+        if not checked and not unchecked:
+            return (True, None)  # No gate section = backward compat
+        if unchecked:
+            reason = (
+                f"Completion gate rejected: {len(unchecked)} unchecked item(s) in CLAUDE.md:\n"
+                + "\n".join(f"  - [ ] {item}" for item in unchecked)
+            )
+            return (False, reason)
+        logger.info("Completion gate passed: %d/%d items checked", len(checked), len(checked))
+        return (True, None)
+
     def _merge_research_and_verification(
         self, research: str, verification: str
     ) -> str:
@@ -1011,12 +1098,55 @@ class LoopDriver:
             f"{verification}\n\nIMPORTANT: Address issues above before implementing."
         )
 
+    def _derive_focus_area(self, parsed: ParsedStream) -> Optional[str]:
+        """Derive a research focus area from the last iteration's work.
+
+        Priority: BLUEPRINT.md current phase > last commit messages > files modified > initial prompt.
+        """
+        # 1. Check BLUEPRINT.md for current phase
+        blueprint = self.project_path / "BLUEPRINT.md"
+        if blueprint.exists():
+            try:
+                text = blueprint.read_text(encoding="utf-8")[:2000]
+                # Look for TODO/IN_PROGRESS phases
+                for line in text.splitlines():
+                    if any(marker in line.upper() for marker in ("TODO", "IN_PROGRESS", "IN PROGRESS")):
+                        return line.strip().lstrip("#- ").strip()
+            except OSError:
+                pass
+
+        # 2. Last commit messages (from git log)
+        try:
+            result = subprocess.run(
+                ["git", "log", "--oneline", "-3"],
+                cwd=str(self.project_path),
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                commits = result.stdout.strip().splitlines()
+                return f"Recent work: {'; '.join(c.split(' ', 1)[1] if ' ' in c else c for c in commits[:3])}"
+        except (subprocess.SubprocessError, FileNotFoundError):
+            pass
+
+        # 3. Files modified in last iteration
+        if parsed.files_modified:
+            files = list(parsed.files_modified)[:5]
+            return f"Files modified in last iteration: {', '.join(files)}"
+
+        # 4. Fall back to initial prompt summary
+        if self.initial_prompt:
+            return self.initial_prompt[:200]
+
+        return None
+
     def _build_next_prompt(self, research_response: str) -> str:
-        """Format research results into the next Claude prompt."""
+        """Format structured research results into the next Claude prompt."""
         return (
-            "Continue the implementation. Here are the strategic next steps from research:\n\n"
+            "Continue the implementation. Below is a structured strategic analysis from research.\n"
+            "Pay attention to IMMEDIATE NEXT STEPS for your priority actions and BLOCKERS for issues to resolve.\n\n"
             f"{research_response}\n\n"
-            "Focus on the highest priority item. If all tasks are complete, output PROJECT_COMPLETE."
+            "Focus on the highest priority item from IMMEDIATE NEXT STEPS. "
+            "If all tasks are complete, output PROJECT_COMPLETE."
         )
 
     def _log_summary(self, iterations: int) -> None:

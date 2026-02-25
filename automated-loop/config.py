@@ -99,6 +99,17 @@ class PatternsConfig(BaseModel):
     )
 
 
+class CompletionGateConfig(BaseModel):
+    """Completion gate: validate PROJECT_COMPLETE against CLAUDE.md checklist."""
+
+    enabled: bool = Field(default=True)
+    section_marker: str = Field(default="## Completion Gate")
+    max_rejections: int = Field(
+        default=3, ge=1,
+        description="Max consecutive gate rejections before exiting with stagnation",
+    )
+
+
 class SecurityConfig(BaseModel):
     """Security and redaction settings."""
 
@@ -195,6 +206,7 @@ class WorkflowConfig(BaseModel):
     perplexity: PerplexityConfig = Field(default_factory=PerplexityConfig)
     claude: ClaudeConfig = Field(default_factory=ClaudeConfig)
     patterns: PatternsConfig = Field(default_factory=PatternsConfig)
+    completion_gate: CompletionGateConfig = Field(default_factory=CompletionGateConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     retry: RetryConfig = Field(default_factory=RetryConfig)
     stagnation: StagnationConfig = Field(default_factory=StagnationConfig)
