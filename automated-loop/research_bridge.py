@@ -237,16 +237,24 @@ class ResearchBridge:
         self,
         extra_context: Optional[str] = None,
         codebase_context: Optional[dict[str, str]] = None,
+        focus_area: Optional[str] = None,
     ) -> str:
-        """Build a structured research query from project context."""
+        """Build a structured research query from project context.
+
+        Matches the /research-perplexity skill prompt structure for consistent,
+        actionable 8-section output.
+        """
         ctx = self.context.gather()
 
         parts = [
-            "You are a software development strategist analyzing a project's current state.",
-            "Based on the context below, provide specific, actionable next steps.",
-            "Focus on: what to implement next, potential blockers, and strategic priorities.",
+            "You are a development strategy advisor analyzing a coding session.",
+            "Given the project context below, provide strategic analysis and concrete next steps.",
             "",
         ]
+
+        if focus_area:
+            parts.append(f"FOCUS AREA: {focus_area}")
+            parts.append("")
 
         if ctx.get("claude_md"):
             parts.append("## Project Definition (CLAUDE.md)")
@@ -280,11 +288,20 @@ class ResearchBridge:
             parts.append(extra_context)
             parts.append("")
 
-        parts.append("## Question")
+        parts.append("## Response Format")
         parts.append(
-            "What are the top 3-5 most important next steps for this project? "
-            "Be specific about files to modify, features to implement, and potential issues. "
-            "If the project appears complete, respond with PROJECT_COMPLETE."
+            "Please analyze and respond with these sections:\n"
+            "1. CURRENT STATE: What has been accomplished\n"
+            "2. PROGRESS VS PLAN: How does the work align with the implementation plan?\n"
+            "3. IMMEDIATE NEXT STEPS: 3-5 concrete actions with file paths\n"
+            "4. BLOCKERS: Issues that need resolution\n"
+            "5. TECHNICAL DEBT: Items to address soon\n"
+            "6. STRATEGIC RECOMMENDATIONS: Longer-term direction\n"
+            "7. RISKS: What could go wrong, and mitigations\n"
+            "8. CODEBASE FIT: How recommendations integrate with existing code\n"
+            "\n"
+            "If the project appears complete (all planned work done), "
+            "respond with PROJECT_COMPLETE as the first line of CURRENT STATE."
         )
 
         return "\n".join(parts)
@@ -326,7 +343,11 @@ class ResearchBridge:
         jitter = 0.5 + random.random()
         return delay * jitter
 
-    def query(self, extra_context: Optional[str] = None) -> Result[ResearchResult]:
+    def query(
+        self,
+        extra_context: Optional[str] = None,
+        focus_area: Optional[str] = None,
+    ) -> Result[ResearchResult]:
         """Execute a research query with retry and circuit breaker."""
         if self._is_circuit_open():
             return Result.fail(
@@ -356,7 +377,8 @@ class ResearchBridge:
 
         for attempt in range(self.retry_config.max_retries + 1):
             last_result = self._single_query(
-                extra_context, codebase_context=codebase_context
+                extra_context, codebase_context=codebase_context,
+                focus_area=focus_area,
             )
 
             if last_result.success:
@@ -387,9 +409,12 @@ class ResearchBridge:
         self,
         extra_context: Optional[str] = None,
         codebase_context: Optional[dict[str, str]] = None,
+        focus_area: Optional[str] = None,
     ) -> Result[ResearchResult]:
         """Execute a single research query via Playwright browser automation (no retry)."""
-        query_text = self.build_query(extra_context, codebase_context=codebase_context)
+        query_text = self.build_query(
+            extra_context, codebase_context=codebase_context, focus_area=focus_area,
+        )
 
         try:
             cmd = [
