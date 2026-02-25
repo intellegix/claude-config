@@ -2202,3 +2202,231 @@ class TestPostExecutionValidation:
         event_types = [e["event_type"] for e in events]
         assert "validation_start" in event_types
         assert "validation_complete" in event_types
+
+
+class TestCompletionGate:
+    """Tests for the completion gate feature that validates PROJECT_COMPLETE against a CLAUDE.md checklist."""
+
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_gate_rejects_unchecked_items(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """CLAUDE.md has unchecked items -> completion rejected, trace event emitted."""
+        config.limits.max_iterations = 2
+        # Write CLAUDE.md with unchecked gate items
+        (project_dir / "CLAUDE.md").write_text(
+            "# Project\n\n## Completion Gate\n- [ ] Task A\n- [x] Task B\n- [ ] Task C\n",
+            encoding="utf-8",
+        )
+
+        call_count = [0]
+
+        def popen_side_effect(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get("args", [])
+            if isinstance(cmd, list) and cmd and cmd[0] == "claude":
+                call_count[0] += 1
+                return MockPopen(
+                    build_ndjson_stream(f"s{call_count[0]}", 0.01, 5, "All done. PROJECT_COMPLETE")
+                )
+            return MockPopen("")
+
+        mock_popen.side_effect = popen_side_effect
+        mock_run.side_effect = make_subprocess_dispatcher(
+            research_result=mock_playwright_result(),
+        )
+
+        driver = LoopDriver(project_dir, config)
+        exit_code = driver.run()
+
+        # Should NOT exit with EXIT_COMPLETE — gate rejected
+        assert exit_code != EXIT_COMPLETE
+
+        # Trace should have completion_gate_rejected event
+        trace_path = project_dir / ".workflow" / "trace.jsonl"
+        events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").strip().splitlines()]
+        event_types = [e["event_type"] for e in events]
+        assert "completion_gate_rejected" in event_types
+
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_gate_accepts_all_checked(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """All items checked -> completion accepted normally."""
+        (project_dir / "CLAUDE.md").write_text(
+            "# Project\n\n## Completion Gate\n- [x] Task A\n- [x] Task B\n- [x] Task C\n",
+            encoding="utf-8",
+        )
+
+        mock_popen.side_effect = make_popen_dispatcher(
+            claude_ndjson=build_ndjson_stream("s1", 0.01, 5, "PROJECT_COMPLETE"),
+        )
+        mock_run.side_effect = make_subprocess_dispatcher()
+
+        driver = LoopDriver(project_dir, config)
+        exit_code = driver.run()
+        assert exit_code == EXIT_COMPLETE
+
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_gate_no_section_backward_compat(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """No '## Completion Gate' section -> accepts (existing behavior unchanged)."""
+        # Default CLAUDE.md from fixture has no gate section
+        mock_popen.side_effect = make_popen_dispatcher(
+            claude_ndjson=build_ndjson_stream("s1", 0.01, 5, "PROJECT_COMPLETE"),
+        )
+        mock_run.side_effect = make_subprocess_dispatcher()
+
+        driver = LoopDriver(project_dir, config)
+        exit_code = driver.run()
+        assert exit_code == EXIT_COMPLETE
+
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_gate_disabled_via_config(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """Gate disabled via config -> accepts even with unchecked items."""
+        config.completion_gate.enabled = False
+        (project_dir / "CLAUDE.md").write_text(
+            "# Project\n\n## Completion Gate\n- [ ] Unchecked task\n",
+            encoding="utf-8",
+        )
+
+        mock_popen.side_effect = make_popen_dispatcher(
+            claude_ndjson=build_ndjson_stream("s1", 0.01, 5, "PROJECT_COMPLETE"),
+        )
+        mock_run.side_effect = make_subprocess_dispatcher()
+
+        driver = LoopDriver(project_dir, config)
+        exit_code = driver.run()
+        assert exit_code == EXIT_COMPLETE
+
+    def test_gate_parser_edge_cases(
+        self, project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """Parser handles: uppercase [X], BOM, CRLF, non-checkbox lines, gate followed by heading."""
+        # Write a CLAUDE.md with various edge cases: BOM + CRLF + mixed content
+        content = (
+            "\ufeff"  # BOM
+            "# Project\r\n"
+            "\r\n"
+            "## Completion Gate\r\n"
+            "- [X] Uppercase checked\r\n"
+            "- [x] Lowercase checked\r\n"
+            "Some random text that is not a checkbox\r\n"
+            "- [ ] Still unchecked\r\n"
+            "\r\n"
+            "## Next Section\r\n"
+            "- [ ] This should NOT be parsed (outside gate)\r\n"
+        )
+        (project_dir / "CLAUDE.md").write_bytes(content.encode("utf-8-sig"))
+
+        driver = LoopDriver(project_dir, config, dry_run=True, skip_preflight=True)
+        checked, unchecked = driver._parse_completion_gate(project_dir / "CLAUDE.md")
+        assert len(checked) == 2
+        assert "Uppercase checked" in checked
+        assert "Lowercase checked" in checked
+        assert len(unchecked) == 1
+        assert "Still unchecked" in unchecked
+        # "This should NOT be parsed" is after ## Next Section, so excluded
+
+    def test_gate_parser_empty_section(
+        self, project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """Empty gate section returns empty lists."""
+        (project_dir / "CLAUDE.md").write_text(
+            "# Project\n\n## Completion Gate\n\n## Next\n",
+            encoding="utf-8",
+        )
+        driver = LoopDriver(project_dir, config, dry_run=True, skip_preflight=True)
+        checked, unchecked = driver._parse_completion_gate(project_dir / "CLAUDE.md")
+        assert checked == []
+        assert unchecked == []
+
+    def test_gate_parser_missing_file(
+        self, project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """Missing CLAUDE.md returns empty lists (no crash)."""
+        driver = LoopDriver(project_dir, config, dry_run=True, skip_preflight=True)
+        checked, unchecked = driver._parse_completion_gate(project_dir / "NONEXISTENT.md")
+        assert checked == []
+        assert unchecked == []
+
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_gate_rejection_sets_next_prompt(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """After rejection, loop continues with rejection text in prompt (doesn't exit complete)."""
+        config.limits.max_iterations = 3
+        config.completion_gate.max_rejections = 5  # High so we don't hit stagnation
+
+        (project_dir / "CLAUDE.md").write_text(
+            "# Project\n\n## Completion Gate\n- [ ] Unfinished work\n",
+            encoding="utf-8",
+        )
+
+        popen_prompts: list[str] = []
+        call_count = [0]
+
+        def popen_side_effect(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get("args", [])
+            if isinstance(cmd, list) and cmd and cmd[0] == "claude":
+                call_count[0] += 1
+                prompt_idx = cmd.index("-p") + 1 if "-p" in cmd else 2
+                popen_prompts.append(cmd[prompt_idx])
+                return MockPopen(
+                    build_ndjson_stream(f"s{call_count[0]}", 0.01, 5, "PROJECT_COMPLETE")
+                )
+            return MockPopen("")
+
+        mock_popen.side_effect = popen_side_effect
+        mock_run.side_effect = make_subprocess_dispatcher(
+            research_result=mock_playwright_result(),
+        )
+
+        driver = LoopDriver(project_dir, config)
+        exit_code = driver.run()
+
+        # Should hit max iterations (not EXIT_COMPLETE), since gate keeps rejecting
+        assert exit_code == EXIT_MAX_ITERATIONS
+        # Second prompt should contain rejection feedback
+        assert len(popen_prompts) >= 2
+        assert "COMPLETION REJECTED" in popen_prompts[1]
+        assert "unchecked" in popen_prompts[1].lower()
+
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_gate_max_rejections_exits_stagnation(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """After max_rejections consecutive rejections, exits with EXIT_STAGNATION (code 3)."""
+        config.limits.max_iterations = 10
+        config.completion_gate.max_rejections = 3
+
+        (project_dir / "CLAUDE.md").write_text(
+            "# Project\n\n## Completion Gate\n- [ ] Never completed\n",
+            encoding="utf-8",
+        )
+
+        mock_popen.side_effect = make_popen_dispatcher(
+            claude_ndjson=build_ndjson_stream("s1", 0.01, 5, "PROJECT_COMPLETE"),
+        )
+        mock_run.side_effect = make_subprocess_dispatcher(
+            research_result=mock_playwright_result(),
+        )
+
+        driver = LoopDriver(project_dir, config)
+        exit_code = driver.run()
+        assert exit_code == EXIT_STAGNATION
+        assert driver._gate_rejection_count == 3
