@@ -22,7 +22,18 @@ Run a deep research query using Perplexity's `/research` mode via Playwright bro
 4. **Active tasks**: Check `TaskList` for any active/pending tasks
 5. **Synthesize**: Form a 1-paragraph internal "current state" summary — do NOT output this to the user, just hold it in context for Step 1
 
-Do NOT present findings. Do NOT ask questions. Proceed directly to Step 1.
+Do NOT present findings. Do NOT ask questions. Proceed directly to Step 0.5.
+
+### Step 0.5: Explore Codebase — MANDATORY, SILENT
+
+After compiling session context (Step 0), explore the actual codebase:
+
+1. **Find key files**: Use `Glob` for main source files (*.py, *.ts, *.js) in project root and src/
+2. **Read recently modified**: Run `git diff --name-only HEAD~5 HEAD`, read up to 10 files (first 100 lines each)
+3. **Read structural files**: README.md, pyproject.toml, package.json if they exist
+4. **Synthesize**: Form internal "codebase summary" — key files, purposes, connections
+
+Do NOT present findings. Do NOT ask questions. Include this context when building the query in Step 1.
 
 ### Step 1: Build the research query
 
@@ -43,7 +54,20 @@ Please analyze and respond with:
 5. TECHNICAL DEBT: Items that should be addressed soon
 6. STRATEGIC RECOMMENDATIONS: Longer-term suggestions for the project direction
 7. RISKS: What could go wrong with the recommended path, and mitigations
+8. CODEBASE FIT: How do recommendations integrate with existing code structure?
 ```
+
+### Step 1.5: Close Browser Bridge Sessions — MANDATORY
+
+**Before launching any Playwright-based query**, close active browser-bridge sessions to prevent DevTools Protocol collisions:
+
+1. Call `mcp__browser-bridge__browser_close_session` to release all browser-bridge tab connections
+2. Wait 2 seconds (`sleep 2` via Bash) for Chrome DevTools to fully detach
+3. Then proceed to Step 2
+
+**Why:** The `research_query` tool launches Playwright (separate Chromium instance). If `browser-bridge` has active Chrome DevTools connections, the two systems can collide — causing tab detachment errors, empty results, and `"Debugger is not attached"` failures. Closing browser-bridge first prevents this.
+
+**After Step 3 (Read results):** Browser-bridge connections can be re-established by calling any `browser-bridge` tool — no explicit reconnect needed.
 
 ### Step 2: Run research query
 
@@ -99,6 +123,15 @@ For each Phase in the master plan, write a detailed sub-plan:
   6. Topic file naming: kebab-case.md
 - **Final phase: Commit & Push** — commit all changes and push to remote
 
+#### Plan Verification — MANDATORY
+
+After writing the complete plan but BEFORE calling `ExitPlanMode`:
+
+1. **Build verification query**: Include the complete plan + research summary + key codebase files from Step 0.5
+2. **Run verification**: Call `research_query` with a critique-focused prompt asking Perplexity to evaluate: logical errors, missing edge cases, file path accuracy, dependency ordering, scope creep, feasibility
+3. **Revise plan**: If critique identifies issues, revise the plan. If APPROVED, proceed as-is.
+4. **Maximum 1 verification pass** — never re-verify after revision. Call ExitPlanMode.
+
 Write the full plan (master + all sub-plans), then call `ExitPlanMode` for user approval.
 
 After the user approves:
@@ -117,3 +150,4 @@ After the user approves:
 ## Error Handling
 - **Session expired**: Report "run python council_browser.py --save-session to refresh"
 - **Research mode not available**: Falls back to regular Perplexity query
+- **Browser collision / empty results**: If `research_query` returns empty synthesis, the most likely cause is browser-bridge DevTools collision. Close browser-bridge sessions (`browser_close_session`), wait 2 seconds, and retry once. If still empty, report "Perplexity session may be expired — run `/cache-perplexity-session` to refresh."
