@@ -226,6 +226,40 @@ automated claude/
     └── metrics_summary.json
 ```
 
+## The `/orchestrator` Command
+
+The toolkit includes a Claude Code slash command (`/orchestrator`) that wraps `loop_driver.py` in a managed workflow. The orchestrator **writes instruction files, launches one loop, and monitors it** — it never touches source code or runs tests directly.
+
+### Single-Loop Semantics
+
+The orchestrator manages **exactly one `loop_driver.py` process** at a time:
+
+- The **user** defines the task — the orchestrator does not decompose, split, or delegate
+- There are no concurrent loops, no agent selection, no parallel execution
+- Relaunches (for stuck/spinning loops) **terminate** the current process before starting a fresh one
+
+### Lifecycle
+
+```
+/orchestrator <project-path> <task>
+       │
+       ▼
+ Phase A: PLANNING    → Read project context, write CLAUDE.md instructions
+ Phase B: LAUNCHING   → Start single loop_driver.py in background
+ Phase C: MONITORING  → Check git log / state.json every 10 min, handle anomalies
+ Phase D: REPORTING   → Summarize results, offer next task
+```
+
+### Commands
+
+| Command | Action |
+|---------|--------|
+| `/orchestrator <path> <task>` | Activate and start a task |
+| `/orchestrator status` | Report current loop state |
+| `/orchestrator off` | Deactivate orchestrator mode |
+
+The command definition lives in `~/.claude/commands/orchestrator.md` and the agent definition in `~/.claude/agents/orchestrator.md`.
+
 ## Deploying to Other Projects
 
 This directory **is** the toolkit. To automate any project:
