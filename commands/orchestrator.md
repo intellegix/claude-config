@@ -110,13 +110,47 @@ Run in the target project directory:
 
 **DO NOT read source code files.** If you need to understand the codebase, read CLAUDE.md and README.md — they should describe the architecture. If they don't, that's what you'll fix.
 
-### Step 3: Write/Update CLAUDE.md
+### Step 3: Assess Project Maturity
+
+Before writing instructions, classify the project to tailor your approach. Run these commands in the target project directory:
+
+**Collect signals:**
+- `git rev-list --count HEAD` — total commit count
+- `git ls-files | wc -l` — tracked file count (note: may be inflated by generated/vendored files)
+- Read CLAUDE.md — count phases marked `COMPLETE` vs `TODO`/`IN PROGRESS`
+- Check presence: `tests/` or `test/` directory, `.github/workflows/` or CI config, deployment config (Dockerfile, render.yaml, vercel.json), `.env.example`
+
+**Check for manual override:** If the target project's CLAUDE.md contains `<!-- MATURITY_OVERRIDE: <tier> -->`, use that tier and skip classification. Report: "Using manual override: **<tier>**"
+
+**Classify into one of 4 tiers:**
+
+| Tier | Blueprint | Codebase Signals | Approach |
+|------|-----------|-----------------|----------|
+| **Scaffold** | Skeleton/missing, mostly TODOs | <20 files, <20 commits, no tests | Flesh out BLUEPRINT.md first, then build core features phase by phase |
+| **Early Development** | Partial, some sections fleshed out | 20-50 files, growing commit history, few/no tests | Fill blueprint gaps for current task scope, then build the next unfinished feature |
+| **Feature Complete** | Complete or mostly complete | 50+ files, substantial commits, some tests exist | Focus on hardening: error handling, edge cases, test coverage, documentation |
+| **Production Ready** | Complete | Mature codebase, CI passes, good test coverage, deployment config present | Target the specific user-requested task: optimization, monitoring, polish, or new features |
+
+**Ambiguity handling:** If signals conflict (e.g., 100+ commits but no tests, or 15 files but complete blueprint with CI), state the conflict and pick the tier that best matches the *majority* of signals. Example: "Signals are mixed — 80 commits suggest development depth, but no test directory found. Classifying as **Early Development** with a note to prioritize test scaffolding."
+
+**Report to user BEFORE writing CLAUDE.md:**
+> "Project assessed as **<tier>** — blueprint is <complete|partial|skeleton> (<evidence>), codebase has <N> files across <N> commits, <test status>, <CI status>. I'll <approach summary>."
+
+**Lock the tier** for this orchestrator session. Do not re-assess unless the user explicitly asks or passes `--force-reassess`.
+
+### Step 4: Write/Update CLAUDE.md
 
 Based on the gathered context and the user's task description:
 1. Update the target project's `CLAUDE.md` with clear task instructions
 2. Structure instructions as phases with status markers (`TODO`, `IN PROGRESS`, `COMPLETE`)
 3. Include acceptance criteria for each phase
-4. Confirm with user: "CLAUDE.md updated with task instructions. Ready to launch loop?"
+4. **Tailor instructions to the assessed maturity tier:**
+   - **Scaffold**: The FIRST phase in CLAUDE.md MUST be "Expand BLUEPRINT.md with missing architectural details for the current task scope" before any implementation phases. Subsequent phases build foundational features one at a time.
+   - **Early Development**: If blueprint has gaps relevant to the current task, the first phase fills those gaps. Then build the feature.
+   - **Feature Complete**: Instructions focus on hardening — error handling, edge cases, test coverage, and documentation. New features are secondary.
+   - **Production Ready**: Instructions target exactly what the user requested. No scaffolding, no blueprint work — the project is mature enough for direct task execution.
+   - If the blueprint is a skeleton (regardless of tier), always include a blueprint expansion phase before implementation.
+5. Confirm with user: "CLAUDE.md updated with task instructions. Ready to launch loop?"
 
 ---
 
