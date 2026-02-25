@@ -88,6 +88,12 @@ The loop includes an automatic **fallback chain**: if Opus hits 2 consecutive ti
 - **Stagnation detection** — two-strike system: resets session first, then exits (code 3)
 - **Timeout cooldown** — exponential backoff (60s base, 300s cap) between timeout retries
 
+### `/orchestrator` Command
+- **Single-loop execution** — manages exactly one `loop_driver.py` process at a time; user defines the task, no decomposition
+- **4-phase lifecycle** — Planning (write CLAUDE.md) → Launching → Monitoring (10-min checks) → Reporting
+- **Desktop notifications** — Windows toast popups on loop launch ("Orchestrator Fired") and completion, with per-project naming
+- **Anomaly response** — detects stuck/spinning/stagnation, terminates current loop, revises instructions, relaunches
+
 ### Observability
 - **Trace logging** — JSONL trace with auto-rotation at 10MB
 - **Extended preflight** — verifies CLI, CLAUDE.md, git, and .workflow writability before starting
