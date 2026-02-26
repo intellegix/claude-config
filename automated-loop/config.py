@@ -164,6 +164,17 @@ class ValidationConfig(BaseModel):
     )
 
 
+class PostReviewConfig(BaseModel):
+    """Post-completion Perplexity review settings."""
+
+    enabled: bool = Field(default=True)
+    focus_area: str = Field(
+        default="Review all implementations for completeness, edge cases, and quality",
+    )
+    timeout_seconds: int = Field(default=600, ge=60, le=1800)
+    save_result: bool = Field(default=True)
+
+
 class StagnationConfig(BaseModel):
     """Diminishing returns detection to prevent runaway loops.
 
@@ -213,6 +224,7 @@ class WorkflowConfig(BaseModel):
     validation: ValidationConfig = Field(default_factory=ValidationConfig)
     verification: VerificationConfig = Field(default_factory=VerificationConfig)
     exploration: ExplorationConfig = Field(default_factory=ExplorationConfig)
+    post_review: PostReviewConfig = Field(default_factory=PostReviewConfig)
 
 
 def load_config(config_path: str | Path) -> Result[WorkflowConfig]:

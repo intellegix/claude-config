@@ -76,6 +76,7 @@ class LoopDriver:
         self._consecutive_timeouts = 0
         self._consecutive_test_failures = 0
         self._gate_rejection_count: int = 0
+        self._gate_existed_at_start: bool = self._check_gate_exists_at_start()
         self._using_fallback = False
         self._original_model: Optional[str] = None
         self.tracker = StateTracker(self.project_path)
@@ -88,6 +89,12 @@ class LoopDriver:
             exploration_config=config.exploration,
             verification_config=config.verification,
         )
+
+    def _check_gate_exists_at_start(self) -> bool:
+        """Check if CLAUDE.md has a Completion Gate section at startup."""
+        claude_md = self.project_path / "CLAUDE.md"
+        checked, unchecked = self._parse_completion_gate(claude_md)
+        return bool(checked or unchecked)
 
     def _default_prompt(self) -> str:
         """Generate a default prompt based on project state."""
@@ -554,6 +561,7 @@ class LoopDriver:
                 self._write_trace_event("completion_detected")
                 self.tracker.complete()
                 self.tracker.save()
+                self._run_post_review()
                 self._log_summary(i)
                 self._write_trace_event("loop_end", exit_code=EXIT_COMPLETE, status="completed")
                 self._write_metrics_summary(EXIT_COMPLETE)
@@ -938,6 +946,48 @@ class LoopDriver:
             logger.warning("Validation command not found: %s", e)
             return Result.fail(f"Validation command not found: {e}", "FILE_NOT_FOUND")
 
+    def _run_post_review(self) -> None:
+        """Run post-completion Perplexity quality review.
+
+        Failures are logged as warnings and never block completion.
+        """
+        if not self.config.post_review.enabled:
+            return
+
+        logger.info("Running post-completion Perplexity quality review...")
+        self._write_trace_event("post_review_start")
+
+        try:
+            result = self.bridge.post_review(
+                focus_area=self.config.post_review.focus_area,
+                timeout=self.config.post_review.timeout_seconds,
+                save_result=self.config.post_review.save_result,
+            )
+
+            if result.success:
+                logger.info("Post-completion review complete")
+                self._write_trace_event(
+                    "post_review_complete",
+                    verdict_preview=result.data.response[:200] if result.data else "",
+                )
+            else:
+                logger.warning(
+                    "Post-completion review failed [%s]: %s",
+                    result.error_code, result.error,
+                )
+                self._write_trace_event(
+                    "post_review_failed",
+                    error_code=result.error_code,
+                    error=result.error,
+                )
+        except Exception as e:
+            logger.warning("Post-completion review unexpected error: %s", e)
+            self._write_trace_event(
+                "post_review_failed",
+                error_code="UNEXPECTED",
+                error=str(e),
+            )
+
     def _dry_run_result(self) -> ParsedStream:
         """Return a simulated ParsedStream for dry runs."""
         from ndjson_parser import ClaudeEvent, ClaudeResult
@@ -1079,7 +1129,10 @@ class LoopDriver:
         claude_md = self.project_path / "CLAUDE.md"
         checked, unchecked = self._parse_completion_gate(claude_md)
         if not checked and not unchecked:
-            return (True, None)  # No gate section = backward compat
+            if self._gate_existed_at_start:
+                # Gate was present at startup but is now missing — evasion detected
+                return (False, "Completion gate section was present at startup but is now missing from CLAUDE.md. Restore the '## Completion Gate' section with checklist items.")
+            return (True, None)  # No gate at startup = backward compat
         if unchecked:
             reason = (
                 f"Completion gate rejected: {len(unchecked)} unchecked item(s) in CLAUDE.md:\n"

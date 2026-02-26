@@ -18,6 +18,7 @@ from helpers import (
     mock_git_diff_stat_result,
     mock_git_log_result,
     mock_playwright_result,
+    mock_post_review_result,
     mock_test_result,
     mock_verification_result,
     MockPopen,
@@ -2276,7 +2277,7 @@ class TestCompletionGate:
         self, mock_run: MagicMock, mock_popen: MagicMock,
         project_dir: Path, config: WorkflowConfig,
     ) -> None:
-        """No '## Completion Gate' section -> accepts (existing behavior unchanged)."""
+        """No '## Completion Gate' section at startup -> accepts (backward compat)."""
         # Default CLAUDE.md from fixture has no gate section
         mock_popen.side_effect = make_popen_dispatcher(
             claude_ndjson=build_ndjson_stream("s1", 0.01, 5, "PROJECT_COMPLETE"),
@@ -2286,6 +2287,41 @@ class TestCompletionGate:
         driver = LoopDriver(project_dir, config)
         exit_code = driver.run()
         assert exit_code == EXIT_COMPLETE
+
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_gate_deleted_during_execution_rejects(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """Gate present at startup but deleted during execution -> rejects (evasion)."""
+        # Write CLAUDE.md WITH a gate section at startup
+        claude_md = project_dir / "CLAUDE.md"
+        claude_md.write_text(
+            "# Project\n\n## Completion Gate\n- [ ] Task A\n- [ ] Task B\n",
+            encoding="utf-8",
+        )
+        config.limits.max_iterations = 4
+        config.completion_gate.max_rejections = 3
+
+        call_count = 0
+
+        def popen_side_effect(*args: object, **kwargs: object) -> MagicMock:
+            nonlocal call_count
+            call_count += 1
+            # On first call, Claude deletes the gate section
+            if call_count == 1:
+                claude_md.write_text("# Project\nNo gate here.\n", encoding="utf-8")
+            return make_popen_dispatcher(
+                claude_ndjson=build_ndjson_stream("s1", 0.01, 5, "PROJECT_COMPLETE"),
+            )(*args, **kwargs)
+
+        mock_popen.side_effect = popen_side_effect
+        mock_run.side_effect = make_subprocess_dispatcher()
+
+        driver = LoopDriver(project_dir, config)
+        exit_code = driver.run()
+        assert exit_code == EXIT_STAGNATION  # Rejected 3x -> stagnation
 
     @patch("subprocess.Popen")
     @patch("subprocess.run")
@@ -2430,3 +2466,148 @@ class TestCompletionGate:
         exit_code = driver.run()
         assert exit_code == EXIT_STAGNATION
         assert driver._gate_rejection_count == 3
+
+
+class TestPostReview:
+    """Tests for post-completion Perplexity quality review."""
+
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_post_review_called_on_completion(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """_run_post_review() is called on successful completion."""
+        mock_popen.side_effect = make_popen_dispatcher(
+            claude_ndjson=build_ndjson_stream("s1", 0.01, 1, "PROJECT_COMPLETE"),
+        )
+        mock_run.side_effect = make_subprocess_dispatcher(
+            research_result=mock_post_review_result(),
+        )
+
+        driver = LoopDriver(project_dir, config)
+        exit_code = driver.run()
+        assert exit_code == EXIT_COMPLETE
+
+        # Verify post_review.md was saved (council_browser was called for review)
+        review_file = project_dir / ".workflow" / "post_review.md"
+        assert review_file.exists()
+
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_post_review_disabled_skips(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """Post-review is skipped when disabled in config."""
+        config.post_review.enabled = False
+        mock_popen.side_effect = make_popen_dispatcher(
+            claude_ndjson=build_ndjson_stream("s1", 0.01, 1, "PROJECT_COMPLETE"),
+        )
+        mock_run.side_effect = make_subprocess_dispatcher()
+
+        driver = LoopDriver(project_dir, config)
+        exit_code = driver.run()
+        assert exit_code == EXIT_COMPLETE
+
+        # No post_review.md should be written
+        review_file = project_dir / ".workflow" / "post_review.md"
+        assert not review_file.exists()
+
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_post_review_failure_does_not_block_completion(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """Post-review failure logs warning but still exits 0."""
+        mock_popen.side_effect = make_popen_dispatcher(
+            claude_ndjson=build_ndjson_stream("s1", 0.01, 1, "PROJECT_COMPLETE"),
+        )
+
+        call_count = [0]
+
+        def dispatcher(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get("args", [])
+            if isinstance(cmd, list) and cmd:
+                if cmd[0] == "git":
+                    return mock_git_log_result()
+                if cmd[0] == "claude" and len(cmd) >= 2 and cmd[1] == "--version":
+                    return MagicMock(returncode=0, stdout="claude 1.0.0\n", stderr="")
+                if "council_browser" in str(cmd):
+                    call_count[0] += 1
+                    raise sp.TimeoutExpired(cmd="python", timeout=600)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        mock_run.side_effect = dispatcher
+
+        driver = LoopDriver(project_dir, config)
+        exit_code = driver.run()
+        # Still completes successfully despite review failure
+        assert exit_code == EXIT_COMPLETE
+
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_post_review_writes_trace_events(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """_run_post_review writes post_review_start and post_review_complete trace events."""
+        mock_popen.side_effect = make_popen_dispatcher(
+            claude_ndjson=build_ndjson_stream("s1", 0.01, 1, "PROJECT_COMPLETE"),
+        )
+        mock_run.side_effect = make_subprocess_dispatcher(
+            research_result=mock_post_review_result(),
+        )
+
+        driver = LoopDriver(project_dir, config)
+        exit_code = driver.run()
+        assert exit_code == EXIT_COMPLETE
+
+        # Check trace.jsonl for post_review events
+        trace_file = project_dir / ".workflow" / "trace.jsonl"
+        assert trace_file.exists()
+        events = [json.loads(line) for line in trace_file.read_text(encoding="utf-8").strip().splitlines()]
+        event_types = [e["event_type"] for e in events]
+        assert "post_review_start" in event_types
+        assert "post_review_complete" in event_types
+
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_post_review_between_save_and_summary(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path, config: WorkflowConfig,
+    ) -> None:
+        """post_review_start occurs after completion_detected and before loop_end."""
+        mock_popen.side_effect = make_popen_dispatcher(
+            claude_ndjson=build_ndjson_stream("s1", 0.01, 1, "PROJECT_COMPLETE"),
+        )
+        mock_run.side_effect = make_subprocess_dispatcher(
+            research_result=mock_post_review_result(),
+        )
+
+        driver = LoopDriver(project_dir, config)
+        exit_code = driver.run()
+        assert exit_code == EXIT_COMPLETE
+
+        trace_file = project_dir / ".workflow" / "trace.jsonl"
+        events = [json.loads(line) for line in trace_file.read_text(encoding="utf-8").strip().splitlines()]
+        event_types = [e["event_type"] for e in events]
+
+        # Verify ordering: completion_detected -> post_review_start -> loop_end
+        completion_idx = event_types.index("completion_detected")
+        review_idx = event_types.index("post_review_start")
+        loop_end_idx = event_types.index("loop_end")
+        assert completion_idx < review_idx < loop_end_idx
+
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    def test_post_review_config_in_workflow_config(
+        self, mock_run: MagicMock, mock_popen: MagicMock,
+        project_dir: Path,
+    ) -> None:
+        """WorkflowConfig includes post_review field with defaults."""
+        cfg = WorkflowConfig()
+        assert hasattr(cfg, "post_review")
+        assert cfg.post_review.enabled is True
+        assert cfg.post_review.timeout_seconds == 600

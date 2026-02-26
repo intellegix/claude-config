@@ -20,7 +20,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from config import ExplorationConfig, Result, RetryConfig, SecurityConfig, VerificationConfig
+from config import ExplorationConfig, PostReviewConfig, Result, RetryConfig, SecurityConfig, VerificationConfig
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +198,35 @@ Respond with:
 - ISSUES: Numbered list of problems
 - SUGGESTIONS: Concrete fixes
 - RISK_ASSESSMENT: Highest-risk element
+"""
+
+POST_REVIEW_PROMPT = """You are a senior QA engineer performing a post-implementation quality audit.
+
+The automated development loop has completed all planned work. Review the implementation
+for production readiness.
+
+PROJECT CONTEXT:
+{project_context}
+
+CODEBASE (key files):
+{codebase_summary}
+
+FOCUS AREA: {focus_area}
+
+Evaluate the implementation across these dimensions:
+
+1. COMPLETENESS: Are all planned features fully implemented? Any stub code or TODOs left?
+2. EDGE CASES: What edge cases might be unhandled? Input validation gaps?
+3. TEST COVERAGE: Are critical paths tested? Any obvious missing test scenarios?
+4. CODE QUALITY: Consistent patterns? Proper error handling? Clean separation of concerns?
+5. REGRESSIONS: Could any changes break existing functionality?
+6. DOCUMENTATION: Are public interfaces documented? CLAUDE.md / README up to date?
+
+Respond with:
+- VERDICT: PASS | CONCERNS | ISSUES_FOUND
+- For each dimension above: brief assessment (1-3 sentences)
+- PRIORITY_FIXES: Numbered list of issues to address (empty if PASS)
+- OVERALL_ASSESSMENT: 2-3 sentence summary
 """
 
 # Error codes that are transient and worth retrying
@@ -550,6 +579,119 @@ class ResearchBridge:
             )
         except Exception as e:
             return Result.fail(f"Verification failed: {e}", "QUERY_ERROR")
+
+    def post_review(
+        self,
+        focus_area: str = "Review all implementations for completeness, edge cases, and quality",
+        timeout: int = 600,
+        save_result: bool = True,
+    ) -> Result[ResearchResult]:
+        """Run a post-completion quality review via Perplexity.
+
+        Gathers project context and codebase files, then sends a quality audit
+        prompt through Playwright. Saves result to .workflow/post_review.md.
+        """
+        # Gather context
+        ctx = self.context.gather()
+        project_context = ""
+        if ctx.get("claude_md"):
+            project_context += f"## CLAUDE.md\n{ctx['claude_md']}\n\n"
+        if ctx.get("git_log"):
+            project_context += f"## Recent Commits\n{ctx['git_log']}\n\n"
+        if ctx.get("workflow_state"):
+            project_context += f"## Workflow State\n{ctx['workflow_state']}\n\n"
+
+        # Explore codebase
+        codebase_summary = "(no codebase context available)"
+        if self.exploration_config.enabled:
+            codebase_files = self.context.explore_codebase(
+                max_files=self.exploration_config.max_files_to_read,
+                max_chars=self.exploration_config.max_chars_per_file,
+            )
+            if codebase_files:
+                parts = []
+                for filepath, content in codebase_files.items():
+                    parts.append(f"### {filepath}\n```\n{content[:1000]}\n```")
+                codebase_summary = "\n".join(parts)
+
+        review_query = POST_REVIEW_PROMPT.format(
+            project_context=project_context[:5000],
+            codebase_summary=codebase_summary[:5000],
+            focus_area=focus_area,
+        )
+
+        try:
+            cmd = [
+                sys.executable, str(COUNCIL_BROWSER_SCRIPT),
+                "--perplexity-mode", self.perplexity_mode,
+                review_query,
+            ]
+            if self.headful:
+                cmd.insert(2, "--headful")
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+
+            if result.returncode != 0:
+                stderr = result.stderr.strip() if result.stderr else "Unknown error"
+                return Result.fail(
+                    f"Post-review subprocess failed (exit {result.returncode}): {stderr}",
+                    "PLAYWRIGHT_ERROR",
+                )
+
+            data = json.loads(result.stdout)
+
+            if data.get("error"):
+                return Result.fail(data["error"], "PLAYWRIGHT_ERROR")
+
+            content = data.get("synthesis", "")
+            if not content:
+                return Result.fail("Empty post-review response", "PARSE_ERROR")
+
+            review_result = ResearchResult(
+                query=review_query[:500],
+                response=content,
+                model=f"perplexity-{self.perplexity_mode}-post-review",
+            )
+
+            # Save to .workflow/post_review.md
+            if save_result:
+                self._save_post_review(review_result)
+
+            return Result.ok(review_result)
+
+        except subprocess.TimeoutExpired:
+            return Result.fail(
+                f"Post-review timed out ({timeout}s)", "TIMEOUT"
+            )
+        except json.JSONDecodeError as e:
+            return Result.fail(f"Invalid JSON from post-review: {e}", "PARSE_ERROR")
+        except FileNotFoundError:
+            return Result.fail(
+                f"council_browser.py not found at {COUNCIL_BROWSER_SCRIPT}",
+                "SCRIPT_NOT_FOUND",
+            )
+        except Exception as e:
+            return Result.fail(f"Post-review failed: {e}", "QUERY_ERROR")
+
+    def _save_post_review(self, result: ResearchResult) -> None:
+        """Save post-review result to .workflow/post_review.md."""
+        output_path = self.project_path / ".workflow" / "post_review.md"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        content = (
+            f"# Post-Completion Quality Review\n\n"
+            f"**Timestamp:** {result.timestamp}\n"
+            f"**Model:** {result.model}\n\n"
+            f"---\n\n"
+            f"{result.response}\n"
+        )
+        output_path.write_text(content, encoding="utf-8")
+        logger.info("Post-review result saved to %s", output_path)
 
     def _save_result(self, result: ResearchResult) -> None:
         """Save research result to .workflow/research_result.md."""
