@@ -8,13 +8,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from config import ExplorationConfig, RetryConfig, VerificationConfig
-from research_bridge import ResearchBridge, SessionContext, VERIFICATION_PROMPT
+from config import ExplorationConfig, PostReviewConfig, RetryConfig, VerificationConfig
+from research_bridge import ResearchBridge, SessionContext, VERIFICATION_PROMPT, POST_REVIEW_PROMPT
 
 from helpers import (
     mock_git_log_result,
     mock_playwright_error,
     mock_playwright_result,
+    mock_post_review_result,
     mock_verification_result,
     make_research_dispatcher,
 )
@@ -547,3 +548,126 @@ class TestVerification:
         assert "LOGICAL ERRORS" in VERIFICATION_PROMPT
         assert "SCOPE CREEP" in VERIFICATION_PROMPT
         assert "FEASIBILITY" in VERIFICATION_PROMPT
+
+
+class TestPostReview:
+    """Tests for post-completion quality review."""
+
+    def test_post_review_prompt_has_expected_sections(self) -> None:
+        """POST_REVIEW_PROMPT contains all quality audit dimensions."""
+        assert "COMPLETENESS" in POST_REVIEW_PROMPT
+        assert "EDGE CASES" in POST_REVIEW_PROMPT
+        assert "TEST COVERAGE" in POST_REVIEW_PROMPT
+        assert "CODE QUALITY" in POST_REVIEW_PROMPT
+        assert "REGRESSIONS" in POST_REVIEW_PROMPT
+        assert "DOCUMENTATION" in POST_REVIEW_PROMPT
+        assert "VERDICT" in POST_REVIEW_PROMPT
+
+    @patch("research_bridge.subprocess.run")
+    def test_post_review_success(
+        self, mock_run: MagicMock, research_project_dir: Path
+    ) -> None:
+        """post_review returns result on success and saves file."""
+        mock_run.side_effect = make_research_dispatcher(
+            playwright_result=mock_post_review_result("PASS", "All good"),
+        )
+        bridge = ResearchBridge(research_project_dir)
+        result = bridge.post_review()
+
+        assert result.success
+        assert result.data is not None
+        assert "PASS" in result.data.response
+
+        # Verify saved to post_review.md
+        review_file = research_project_dir / ".workflow" / "post_review.md"
+        assert review_file.exists()
+        content = review_file.read_text(encoding="utf-8")
+        assert "Post-Completion Quality Review" in content
+        assert "PASS" in content
+
+    @patch("research_bridge.subprocess.run")
+    def test_post_review_timeout(
+        self, mock_run: MagicMock, research_project_dir: Path
+    ) -> None:
+        """post_review timeout returns error."""
+        mock_run.side_effect = make_research_dispatcher(
+            playwright_side_effect=sp.TimeoutExpired(cmd="python", timeout=600)
+        )
+        bridge = ResearchBridge(research_project_dir)
+        result = bridge.post_review()
+
+        assert not result.success
+        assert result.error_code == "TIMEOUT"
+
+    @patch("research_bridge.subprocess.run")
+    def test_post_review_subprocess_failure(
+        self, mock_run: MagicMock, research_project_dir: Path
+    ) -> None:
+        """post_review subprocess crash returns error."""
+        mock_run.side_effect = make_research_dispatcher(
+            playwright_result=MagicMock(returncode=1, stdout="", stderr="crash")
+        )
+        bridge = ResearchBridge(research_project_dir)
+        result = bridge.post_review()
+
+        assert not result.success
+        assert result.error_code == "PLAYWRIGHT_ERROR"
+
+    @patch("research_bridge.subprocess.run")
+    def test_post_review_save_disabled(
+        self, mock_run: MagicMock, research_project_dir: Path
+    ) -> None:
+        """post_review with save_result=False does not write file."""
+        mock_run.side_effect = make_research_dispatcher(
+            playwright_result=mock_post_review_result(),
+        )
+        bridge = ResearchBridge(research_project_dir)
+        result = bridge.post_review(save_result=False)
+
+        assert result.success
+        review_file = research_project_dir / ".workflow" / "post_review.md"
+        assert not review_file.exists()
+
+    @patch("research_bridge.subprocess.run")
+    def test_post_review_includes_context_in_query(
+        self, mock_run: MagicMock, research_project_dir: Path
+    ) -> None:
+        """post_review query includes project context and codebase."""
+        captured_cmd = []
+
+        def capture_side_effect(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get("args", [])
+            if isinstance(cmd, list) and cmd and cmd[0] == "git":
+                return mock_git_log_result()
+            captured_cmd.append(cmd)
+            return mock_post_review_result()
+
+        mock_run.side_effect = capture_side_effect
+        bridge = ResearchBridge(research_project_dir)
+        bridge.post_review(focus_area="Check edge cases")
+
+        assert len(captured_cmd) >= 1
+        query_text = captured_cmd[0][-1]
+        assert "Check edge cases" in query_text
+        assert "COMPLETENESS" in query_text
+
+    def test_post_review_config_defaults(self) -> None:
+        """PostReviewConfig loads with sensible defaults."""
+        cfg = PostReviewConfig()
+        assert cfg.enabled is True
+        assert cfg.timeout_seconds == 600
+        assert cfg.save_result is True
+        assert "completeness" in cfg.focus_area.lower()
+
+    def test_post_review_config_custom_values(self) -> None:
+        """PostReviewConfig accepts custom values."""
+        cfg = PostReviewConfig(
+            enabled=False,
+            focus_area="Focus on security",
+            timeout_seconds=120,
+            save_result=False,
+        )
+        assert cfg.enabled is False
+        assert cfg.focus_area == "Focus on security"
+        assert cfg.timeout_seconds == 120
+        assert cfg.save_result is False

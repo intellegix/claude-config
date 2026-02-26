@@ -81,6 +81,27 @@ def mock_verification_result(
     )
 
 
+def mock_post_review_result(
+    verdict: str = "PASS", assessment: str = "All implementations look good"
+) -> MagicMock:
+    """Build a mock subprocess result for post-completion review."""
+    synthesis = (
+        f"VERDICT: {verdict}\n"
+        f"OVERALL_ASSESSMENT: {assessment}\n"
+        f"PRIORITY_FIXES: None"
+    )
+    return MagicMock(
+        returncode=0,
+        stdout=json.dumps({
+            "synthesis": synthesis,
+            "models": ["perplexity-research-post-review"],
+            "citations": [],
+            "execution_time_ms": 25000,
+        }),
+        stderr="",
+    )
+
+
 def mock_playwright_error(error: str = "Browser timeout") -> MagicMock:
     """Build a mock subprocess result for Playwright error."""
     return MagicMock(
@@ -147,14 +168,14 @@ def make_subprocess_dispatcher(
                 if claude_side_effect is not None:
                     raise claude_side_effect
                 return claude_result
-            if len(cmd) > 1 and "claude" in str(cmd[1]):
-                if claude_side_effect is not None:
-                    raise claude_side_effect
-                return claude_result
             if "council_browser" in str(cmd):
                 if research_side_effect is not None:
                     raise research_side_effect
                 return research_result
+            if len(cmd) > 1 and "claude" in str(cmd[1]):
+                if claude_side_effect is not None:
+                    raise claude_side_effect
+                return claude_result
             # Test runner commands (pytest, python -m pytest, etc.)
             if cmd[0] in ("pytest", "python") and test_result is not None:
                 return test_result
