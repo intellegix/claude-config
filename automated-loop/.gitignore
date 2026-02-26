@@ -1,9 +1,14 @@
 .env
+.coverage
+memory/
 .workflow/state.json
 .workflow/*.log
+.workflow/*.jsonl
 .workflow/research_result*.md
 .workflow/metrics_summary*.json
 .workflow/trace*.jsonl
+.workflow/orchestrator-mode.json
+.workflow/post_review.md
 __pycache__/
 *.pyc
 .pytest_cache/
