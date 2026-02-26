@@ -270,9 +270,13 @@ The loop never modifies `CLAUDE.md` itself — the human retains full editorial 
 
 **Concurrent Perplexity Research Queries**
 
-When running multiple loop instances that each trigger Perplexity research, only one query typically succeeds. Each research query launches a headful Chromium instance using the same Perplexity session cookies (`~/.claude/config/playwright-session.json`). Perplexity's web UI is designed for single-user interaction — concurrent browsers presenting the same session get errors or incomplete results. The toolkit includes a `SessionSemaphore` (max 3 concurrent browser slots), but Perplexity's own session handling means concurrent queries from the same account rarely all succeed.
+Concurrent research queries now work in most cases, thanks to a 3-layer fix:
 
-**Workaround**: Run research-heavy loops sequentially, or stagger start times so research phases don't overlap.
+- **Process cleanup** (`council_browser.py`): Snapshots Chrome PIDs before/after browser launch. After `playwright.stop()`, any surviving `chrome.exe` processes are force-killed after a 1-second grace period, preventing orphaned instances from blocking subsequent queries.
+- **Profile isolation**: Each browser session gets a unique temp user-data-dir (`tempfile.mkdtemp(prefix="council_np_")`), eliminating Chrome `SingletonLock` conflicts. Node.js subprocess calls use `execFileAsync` for non-blocking concurrent execution.
+- **DevTools protocol coordination**: `/research-perplexity`, `/labs-perplexity`, and `/export-to-council` commands include a mandatory "Close Browser Bridge Sessions" step before launching Playwright, preventing DevTools Protocol collisions between browser-bridge and Playwright.
+
+The `SessionSemaphore` limits concurrency to 3 browser slots. Very high concurrency (4+ simultaneous queries) may still hit Perplexity's own session limits when using the same account.
 
 **Research Query Retries**
 
