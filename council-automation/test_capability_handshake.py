@@ -85,7 +85,7 @@ class TestCapabilityHandshake(unittest.TestCase):
     def test_fallback_config(self):
         """Sonar fallback config is correct."""
         self.assertEqual(council_config.FALLBACK_MODEL, "sonar-pro")
-        self.assertTrue(council_config.FALLBACK_ENABLED)
+        self.assertFalse(council_config.FALLBACK_ENABLED)  # Disabled — browser mode is primary
 
     def test_model_instructions_no_stale_references(self):
         """MODEL_INSTRUCTIONS should not reference 'search results from other models'."""
